@@ -2,7 +2,7 @@
 
 Public-facing deployment wrapper for the `0x0/` Flask file host. This version is hardened for direct file uploads and file retrieval only.
 
-## Hardening Changes
+## ⚠️ Hardening Changes ⚠️
 
 Compared with the upstream app behavior, this branch is intentionally narrower and more explicit about its public deployment posture:
 
