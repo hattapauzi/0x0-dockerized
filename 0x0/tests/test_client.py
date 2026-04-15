@@ -1,15 +1,34 @@
 import pytest
 import tempfile
 import os
+import sys
+import importlib
 from flask_migrate import upgrade as db_upgrade
 from io import BytesIO
 
-from fhost import app, db, url_for, File, URL
+app = None
+db = None
+url_for = None
+File = None
+URL = None
 
 @pytest.fixture
 def client():
+    global app, db, url_for, File, URL
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmpdir}/db.sqlite"
+        os.environ["DATABASE_URI"] = f"sqlite:///{tmpdir}/db.sqlite"
+
+        if "fhost" in sys.modules:
+            fhost = importlib.reload(sys.modules["fhost"])
+        else:
+            fhost = importlib.import_module("fhost")
+
+        app = fhost.app
+        db = fhost.db
+        url_for = fhost.url_for
+        File = fhost.File
+        URL = fhost.URL
         app.config["FHOST_STORAGE_PATH"] = os.path.join(tmpdir, "up")
         app.config["TESTING"] = True
 
@@ -78,4 +97,3 @@ def test_client(client):
             app.logger.info(f"GET {p}")
             rv = client.get(p)
             assert rv.status_code == code
-
