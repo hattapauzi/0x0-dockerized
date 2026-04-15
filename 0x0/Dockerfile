@@ -1,16 +1,16 @@
-FROM python:3.10
+FROM python:3.10-slim
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	build-essential \
+	libmagic1 \
+	libmagic-dev \
+	libpq-dev \
+	&& rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
 
-RUN apt-get update
-RUN apt-get -y install cron
-
-# Files cleanup cronjob
-RUN crontab -l | { cat; echo "0 2 * * * /app/cleanup.py"; } | crontab -
-
-RUN pip install --no-cache-dir -r requirements.txt
-
-CMD flask db upgrade; \
-	uwsgi --socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2
+CMD ["sh", "-c", "flask db upgrade && uwsgi --socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2"]

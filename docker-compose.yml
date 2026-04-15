@@ -1,16 +1,12 @@
-version: "3.9"
-
 services:
   app:
-    # build: ./0x0
-    image: lastradev/0x0:latest
+    build: ./0x0
     container_name: app
+    restart: unless-stopped
     environment:
-      DATABASE_URI: "postgresql://toor:toor@db/db"
+      DATABASE_URI: "${DATABASE_URI}"
       FLASK_APP: fhost
-      APP_PORT: 8080
-      # size in MB
-      MAX_SIZE: 512
+      MAX_SIZE: "${MAX_SIZE_MB:-512}"
     volumes:
       - ./data/up:/app/up
     expose:
@@ -20,31 +16,44 @@ services:
         condition: service_healthy
 
   db:
-    image: postgres:alpine3.15
+    image: postgres:16-alpine
     container_name: postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: toor
-      POSTGRES_USER: toor
-      POSTGRES_DB: db
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_DB: "${POSTGRES_DB}"
     expose:
       - 5432
     volumes:
       - ./data/db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -d db -U toor"]
+      test: ["CMD-SHELL", "pg_isready -d ${POSTGRES_DB} -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   nginx:
-    # build: ./nginx
-    image: lastradev/0x0-nginx:latest
+    build: ./nginx
     container_name: nginx
+    restart: unless-stopped
     volumes:
       - ./data/up:/etc/nginx/html/up
     environment:
-      MAX_SIZE: 512M
+      MAX_SIZE: "${MAX_SIZE_NGINX:-512M}"
     ports:
       - 80:80
     depends_on:
       - app
+
+  cleanup:
+    build: ./0x0
+    profiles:
+      - maintenance
+    environment:
+      DATABASE_URI: "${DATABASE_URI}"
+      FLASK_APP: fhost
+      MAX_SIZE: "${MAX_SIZE_MB:-512}"
+    command: ["python", "cleanup.py"]
+    volumes:
+      - ./data/up:/app/up
