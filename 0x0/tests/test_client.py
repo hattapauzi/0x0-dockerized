@@ -3,6 +3,7 @@ import tempfile
 import os
 import sys
 import importlib
+import re
 from flask_migrate import upgrade as db_upgrade
 from io import BytesIO
 
@@ -11,6 +12,7 @@ db = None
 url_for = None
 File = None
 URL = None
+TOKEN_RE = re.compile(r"^https://localhost/[A-Za-z0-9_-]{12}(?:\.[A-Za-z0-9._-]+)?\n$")
 
 @pytest.fixture
 def client():
@@ -39,22 +41,31 @@ def client():
 
 def test_client(client):
     payloads = [
-        ({ "file" : (BytesIO(b"hello"), "hello.txt") }, 200, b"https://localhost/E.txt\n"),
-        ({ "file" : (BytesIO(b"hello"), "hello.ignorethis") }, 200, b"https://localhost/E.txt\n"),
-        ({ "file" : (BytesIO(b"bye"), "bye.truncatethis") }, 200, b"https://localhost/Q.truncate\n"),
-        ({ "file" : (BytesIO(b"hi"), "hi.tar.gz") }, 200, b"https://localhost/h.tar.gz\n"),
-        ({ "file" : (BytesIO(b"lea!"), "lea!") }, 200, b"https://localhost/d.txt\n"),
-        ({ "file" : (BytesIO(b"why?"), "balls", "application/x-dosexec") }, 200, None),
-        ({}, 400, None),
+        ({ "file" : (BytesIO(b"hello"), "hello.txt") }, 200),
+        ({ "file" : (BytesIO(b"hello"), "hello.ignorethis") }, 200),
+        ({ "file" : (BytesIO(b"bye"), "bye.truncatethis") }, 200),
+        ({ "file" : (BytesIO(b"hi"), "hi.tar.gz") }, 200),
+        ({ "file" : (BytesIO(b"lea!"), "lea!") }, 200),
+        ({ "file" : (BytesIO(b"why?"), "balls", "application/x-dosexec") }, 200),
+        ({}, 400),
     ]
 
-    for p, s, r in payloads:
+    paths = []
+    for p, s in payloads:
         rv = client.post("/", buffered=True,
                         content_type="multipart/form-data",
                         data=p)
         assert rv.status_code == s
-        if r:
-            assert rv.data == r
+        if rv.status_code == 200:
+            location = rv.data.decode()
+            assert TOKEN_RE.match(location)
+            paths.append(location.removeprefix("https://localhost/").strip())
+
+    assert paths[0] == paths[1]
+    assert paths[0].endswith(".txt")
+    assert paths[2].endswith(".truncate")
+    assert paths[3].endswith(".tar.gz")
+    assert paths[4].endswith(".txt")
 
     f = File.query.get(2)
     f.removed = True
@@ -65,26 +76,26 @@ def test_client(client):
         (200, [
             "/",
             "robots.txt",
-            "E.txt",
-            "E.txt/test",
-            "E.txt/test.py",
-            "d.txt",
-            "h.tar.gz",
+            paths[0],
+            f"{paths[0]}/test",
+            f"{paths[0]}/test.py",
+            paths[4],
+            paths[3],
         ]),
         (404, [
-            "E",
-            "E/test",
-            "E/test.bin",
+            paths[0].split(".", 1)[0],
+            f"{paths[0].split('.', 1)[0]}/test",
+            f"{paths[0].split('.', 1)[0]}/test.bin",
             "test.bin",
             "test.bin/test",
             "test.bin/test.py",
             "test",
             "test/test",
             "test.bin/test.py",
-            "E.bin",
+            f"{paths[0].split('.', 1)[0]}.bin",
         ]),
         (451, [
-            "Q.truncate",
+            paths[2],
         ]),
     ]
 
@@ -116,16 +127,29 @@ def test_rejects_generic_url_shortening(client):
 
 
 def test_uploaded_file_response_sets_nosniff(client):
-    client.post(
+    rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
         data={"file": (BytesIO(b"hello"), "hello.txt")},
     )
 
-    rv = client.get("E.txt")
+    file_path = rv.data.decode().removeprefix("https://localhost/").strip()
+    rv = client.get(file_path)
     assert rv.status_code == 200
     assert rv.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_uploaded_file_urls_use_long_random_tokens(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"randomized"), "sample.txt")},
+    )
+
+    assert rv.status_code == 200
+    assert TOKEN_RE.match(rv.data.decode())
 
 
 def test_html_upload_is_rejected(client):

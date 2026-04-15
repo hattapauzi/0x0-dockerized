@@ -7,7 +7,7 @@ Public-facing deployment wrapper for the `0x0/` Flask file host. This version is
 Compared with the upstream app behavior, this branch is intentionally narrower and more explicit about its public deployment posture:
 
 - direct file uploads are supported
-- uploaded files are retrievable through short hosted URLs
+- uploaded files are retrievable through hosted URLs with fixed-length random tokens
 - remote URL import is disabled
 - generic external URL shortening is disabled
 - active web payloads such as HTML, SVG, and XML are rejected
@@ -54,7 +54,7 @@ Upload a file directly to the host:
 curl -F'file=@0x0/README.rst' http://localhost/
 ```
 
-The response should be a short file URL such as `http://localhost/E.txt`. Open that URL from a second client to verify retrieval works externally.
+The response should be a hosted file URL such as `http://localhost/aK7mQ2xPdL8N.txt`. Open that URL from a second client to verify retrieval works externally.
 
 ## Maintenance
 

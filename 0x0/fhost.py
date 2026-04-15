@@ -27,6 +27,7 @@ from jinja2 import ChoiceLoader, FileSystemLoader
 from hashlib import sha256
 from magic import Magic
 from mimetypes import guess_extension
+import secrets
 import sys
 from pathlib import Path
 
@@ -65,6 +66,7 @@ app.config.update(
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
     NSFW_THRESHOLD = 0.608,
+    FHOST_TOKEN_LENGTH = 12,
     URL_ALPHABET = "DEQhd2uFteibPwq0SWBInTpA_jcZL5GKz3YCR14Ulk87Jors9vNHgfaOmMXy6Vx-",
 )
 
@@ -118,20 +120,22 @@ class URL(db.Model):
 class File(db.Model):
     id = db.Column(db.Integer, primary_key = True)
     sha256 = db.Column(db.String, unique = True)
+    token = db.Column(db.String(32), unique = True, nullable = False)
     ext = db.Column(db.UnicodeText)
     mime = db.Column(db.UnicodeText)
     addr = db.Column(db.UnicodeText)
     removed = db.Column(db.Boolean, default=False)
     nsfw_score = db.Column(db.Float)
 
-    def __init__(self, sha256, ext, mime, addr):
+    def __init__(self, sha256, token, ext, mime, addr):
         self.sha256 = sha256
+        self.token = token
         self.ext = ext
         self.mime = mime
         self.addr = addr
 
     def getname(self):
-        return u"{0}{1}".format(su.enbase(self.id), self.ext)
+        return u"{0}{1}".format(self.token, self.ext)
 
     def geturl(self):
         n = self.getname()
@@ -144,6 +148,17 @@ class File(db.Model):
     def store(file_, addr):
         data = file_.stream.read()
         digest = sha256(data).hexdigest()
+
+        def generate_token():
+            alphabet = app.config["URL_ALPHABET"]
+            length = app.config["FHOST_TOKEN_LENGTH"]
+            return "".join(secrets.choice(alphabet) for _ in range(length))
+
+        def get_unique_token():
+            while True:
+                token = generate_token()
+                if not File.query.filter_by(token=token).first():
+                    return token
 
         def get_mime():
             guess = mimedetect.from_buffer(data)
@@ -184,10 +199,12 @@ class File(db.Model):
         if f:
             if f.removed:
                 abort(451)
+            if not f.token:
+                f.token = get_unique_token()
         else:
             mime = get_mime()
             ext = get_ext(mime)
-            f = File(digest, ext, mime, addr)
+            f = File(digest, get_unique_token(), ext, mime, addr)
 
         f.addr = addr
 
@@ -270,10 +287,9 @@ def get(path):
     path = Path(path.split("/", 1)[0])
     sufs = "".join(path.suffixes[-2:])
     name = path.name[:-len(sufs) or None]
-    id = su.debase(name)
 
     if sufs:
-        f = File.query.get(id)
+        f = File.query.filter_by(token=name).first()
 
         if f and f.ext == sufs:
             if f.removed:
@@ -285,12 +301,6 @@ def get(path):
                 abort(404)
 
             return build_file_response(f, fpath)
-    else:
-        u = URL.query.get(id)
-
-        if u:
-            return redirect(u.url)
-
     abort(404)
 
 @app.route("/", methods=["GET", "POST"])
