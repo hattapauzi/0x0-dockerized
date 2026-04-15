@@ -44,9 +44,7 @@ def test_client(client):
         ({ "file" : (BytesIO(b"bye"), "bye.truncatethis") }, 200, b"https://localhost/Q.truncate\n"),
         ({ "file" : (BytesIO(b"hi"), "hi.tar.gz") }, 200, b"https://localhost/h.tar.gz\n"),
         ({ "file" : (BytesIO(b"lea!"), "lea!") }, 200, b"https://localhost/d.txt\n"),
-        ({ "file" : (BytesIO(b"why?"), "balls", "application/x-dosexec") }, 415, None),
-        ({ "shorten" : "https://0x0.st" }, 200, b"https://localhost/E\n"),
-        ({ "shorten" : "https://localhost" }, 400, None),
+        ({ "file" : (BytesIO(b"why?"), "balls", "application/x-dosexec") }, 200, None),
         ({}, 400, None),
     ]
 
@@ -73,12 +71,10 @@ def test_client(client):
             "d.txt",
             "h.tar.gz",
         ]),
-        (302, [
+        (404, [
             "E",
             "E/test",
             "E/test.bin",
-        ]),
-        (404, [
             "test.bin",
             "test.bin/test",
             "test.bin/test.py",
@@ -97,3 +93,46 @@ def test_client(client):
             app.logger.info(f"GET {p}")
             rv = client.get(p)
             assert rv.status_code == code
+
+
+def test_rejects_remote_url_import(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"url": "https://example.com/file.txt"},
+    )
+    assert rv.status_code == 400
+
+
+def test_rejects_generic_url_shortening(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"shorten": "https://example.com"},
+    )
+    assert rv.status_code == 400
+
+
+def test_uploaded_file_response_sets_nosniff(client):
+    client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"hello"), "hello.txt")},
+    )
+
+    rv = client.get("E.txt")
+    assert rv.status_code == 200
+    assert rv.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_html_upload_is_rejected(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"<html></html>"), "index.html", "text/html")},
+    )
+    assert rv.status_code == 415

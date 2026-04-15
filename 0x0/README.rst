@@ -1,8 +1,11 @@
 The Null Pointer
 ================
 
-This is a no-bullshit file hosting and URL shortening service that also runs
-`0x0.st <https://0x0.st>`_. Use with uWSGI.
+This repository packages the 0x0 file host for direct uploads and retrieval.
+Use with uWSGI.
+
+For Docker-based public deployment and operations, see the repository root
+``README.md``.
 
 Configuration
 -------------
@@ -31,6 +34,20 @@ To make files expire, simply create a cronjob that runs ``cleanup.py`` every
 now and then.
 
 Before running the service for the first time, run ``FLASK_APP=fhost flask db upgrade``.
+
+Development
+-----------
+
+Create a virtual environment and install the application and test dependencies::
+
+    python -m venv /tmp/0x0-dockerized-venv
+    source /tmp/0x0-dockerized-venv/bin/activate
+    pip install -r requirements-dev.txt
+    FLASK_APP=fhost flask db upgrade
+    python -m pytest -q
+
+Run the test suite from inside the ``0x0/`` directory so imports and relative
+paths behave as expected.
 
 
 NSFW Detection

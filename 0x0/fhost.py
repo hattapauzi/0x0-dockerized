@@ -28,8 +28,6 @@ from hashlib import sha256
 from magic import Magic
 from mimetypes import guess_extension
 import sys
-import requests
-from validators import url as url_valid
 from pathlib import Path
 
 app = Flask(__name__, instance_relative_config=True)
@@ -56,9 +54,13 @@ app.config.update(
         "text/x-diff" : ".diff",
     },
     FHOST_MIME_BLACKLIST = [
+        "application/xml",
+        "application/xhtml+xml",
         "application/x-dosexec",
         "application/java-archive",
-        "application/java-vm"
+        "application/java-vm",
+        "image/svg+xml",
+        "text/html",
     ],
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
@@ -147,10 +149,12 @@ class File(db.Model):
             guess = mimedetect.from_buffer(data)
             app.logger.debug(f"MIME - specified: '{file_.content_type}' - detected: '{guess}'")
 
-            if not file_.content_type or not "/" in file_.content_type or file_.content_type == "application/octet-stream":
+            if guess and "/" in guess:
                 mime = guess
-            else:
+            elif file_.content_type and "/" in file_.content_type:
                 mime = file_.content_type
+            else:
+                mime = "application/octet-stream"
 
             if mime in app.config["FHOST_MIME_BLACKLIST"] or guess in app.config["FHOST_MIME_BLACKLIST"]:
                 abort(415)
@@ -229,26 +233,6 @@ class UrlEncoder(object):
 
 su = UrlEncoder(alphabet=app.config["URL_ALPHABET"], min_length=1)
 
-def fhost_url(scheme=None):
-    if not scheme:
-        return url_for(".fhost", _external=True).rstrip("/")
-    else:
-        return url_for(".fhost", _external=True, _scheme=scheme).rstrip("/")
-
-def is_fhost_url(url):
-    return url.startswith(fhost_url()) or url.startswith(fhost_url("https"))
-
-def shorten(url):
-    if len(url) > app.config["MAX_URL_LENGTH"]:
-        abort(414)
-
-    if not url_valid(url) or is_fhost_url(url) or "\n" in url:
-        abort(400)
-
-    u = URL.get(url)
-
-    return u.geturl()
-
 def in_upload_bl(addr):
     if app.config["FHOST_UPLOAD_BLACKLIST"]:
         with app.open_instance_resource(app.config["FHOST_UPLOAD_BLACKLIST"]) as bl:
@@ -268,32 +252,18 @@ def store_file(f, addr):
 
     return sf.geturl()
 
-def store_url(url, addr):
-    if is_fhost_url(url):
-        abort(400)
-
-    h = { "Accept-Encoding" : "identity" }
-    r = requests.get(url, stream=True, verify=False, headers=h)
-
-    try:
-        r.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        return str(e) + "\n"
-
-    if "content-length" in r.headers:
-        l = int(r.headers["content-length"])
-
-        if l < app.config["MAX_CONTENT_LENGTH"]:
-            def urlfile(**kwargs):
-                return type('',(),kwargs)()
-
-            f = urlfile(stream=r.raw, content_type=r.headers["content-type"], filename="")
-
-            return store_file(f, addr)
-        else:
-            abort(413)
+def build_file_response(f, fpath):
+    if app.config["FHOST_USE_X_ACCEL_REDIRECT"]:
+        response = make_response()
+        response.headers["Content-Length"] = fpath.stat().st_size
+        response.headers["X-Accel-Redirect"] = "/" + str(fpath)
     else:
-        abort(411)
+        response = send_from_directory(app.config["FHOST_STORAGE_PATH"], f.sha256, mimetype = f.mime)
+
+    response.headers["Content-Type"] = f.mime
+    response.headers["Content-Disposition"] = f'attachment; filename="{f.getname()}"'
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 @app.route("/<path:path>")
 def get(path):
@@ -314,14 +284,7 @@ def get(path):
             if not fpath.is_file():
                 abort(404)
 
-            if app.config["FHOST_USE_X_ACCEL_REDIRECT"]:
-                response = make_response()
-                response.headers["Content-Type"] = f.mime
-                response.headers["Content-Length"] = fpath.stat().st_size
-                response.headers["X-Accel-Redirect"] = "/" + str(fpath)
-                return response
-            else:
-                return send_from_directory(app.config["FHOST_STORAGE_PATH"], f.sha256, mimetype = f.mime)
+            return build_file_response(f, fpath)
     else:
         u = URL.query.get(id)
 
@@ -333,14 +296,8 @@ def get(path):
 @app.route("/", methods=["GET", "POST"])
 def fhost():
     if request.method == "POST":
-        sf = None
-
         if "file" in request.files:
             return store_file(request.files["file"], request.remote_addr)
-        elif "url" in request.form:
-            return store_url(request.form["url"], request.remote_addr)
-        elif "shorten" in request.form:
-            return shorten(request.form["shorten"])
 
         abort(400)
     else:
