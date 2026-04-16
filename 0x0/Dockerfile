@@ -12,5 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
+EXPOSE 8080
 
-CMD ["sh", "-c", "flask db upgrade && uwsgi --socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2"]
+CMD ["sh", "-c", "flask db upgrade && uwsgi --http-socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2"]

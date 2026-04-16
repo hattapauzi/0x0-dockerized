@@ -1,7 +1,7 @@
 services:
   app:
     build: ./0x0
-    container_name: app
+    container_name: 0x0st
     restart: unless-stopped
     environment:
       DATABASE_URI: "${DATABASE_URI}"
@@ -9,8 +9,8 @@ services:
       MAX_SIZE: "${MAX_SIZE_MB:-512}"
     volumes:
       - ./data/up:/app/up
-    expose:
-      - 8080
+    ports:
+      - 8081:8080
     depends_on:
       db:
         condition: service_healthy
@@ -32,19 +32,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  nginx:
-    build: ./nginx
-    container_name: nginx
-    restart: unless-stopped
-    volumes:
-      - ./data/up:/etc/nginx/html/up
-    environment:
-      MAX_SIZE: "${MAX_SIZE_NGINX:-512M}"
-    ports:
-      - 80:80
-    depends_on:
-      - app
 
   cleanup:
     build: ./0x0
