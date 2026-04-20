@@ -38,7 +38,7 @@ app.config.update(
     MAX_CONTENT_LENGTH = 256 * 1024 * 1024,
     MAX_URL_LENGTH = 4096,
     USE_X_SENDFILE = False,
-    FHOST_USE_X_ACCEL_REDIRECT = True, # expect nginx by default
+    FHOST_USE_X_ACCEL_REDIRECT = False,  # disabled - no nginx
     FHOST_STORAGE_PATH = "up",
     FHOST_MAX_EXT_LENGTH = 9,
     FHOST_EXT_OVERRIDE = {
