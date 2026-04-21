@@ -105,7 +105,7 @@ class URL(db.Model):
         return su.enbase(self.id)
 
     def geturl(self):
-        return url_for("get", path=self.getname(), _external=True) + "\n"
+        return url_for("get", path=self.getname(), _external=True, _scheme="https") + "\n"
 
     def get(url):
         u = URL.query.filter_by(url=url).first()
@@ -141,9 +141,9 @@ class File(db.Model):
         n = self.getname()
 
         if self.nsfw_score and self.nsfw_score > app.config["NSFW_THRESHOLD"]:
-            return url_for("get", path=n, _external=True, _anchor="nsfw") + "\n"
+            return url_for("get", path=n, _external=True, _scheme="https", _anchor="nsfw") + "\n"
         else:
-            return url_for("get", path=n, _external=True) + "\n"
+            return url_for("get", path=n, _external=True, _scheme="https") + "\n"
 
     def store(file_, addr):
         data = file_.stream.read()
