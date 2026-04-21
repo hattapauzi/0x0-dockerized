@@ -1,4 +1,5 @@
 FROM python:3.10-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -8,16 +9,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libmagic-dev \
 	libpq-dev \
 	&& rm -rf /var/lib/apt/lists/* \
-	&& (getent group www-data >/dev/null || groupadd --gid 82 www-data) \
-	&& (id -u www-data >/dev/null 2>&1 || useradd --uid 82 --gid www-data --shell /bin/false --create-home www-data)
+	&& (getent group app >/dev/null || groupadd --gid 1000 app) \
+	&& (id -u app >/dev/null 2>&1 || useradd --uid 1000 --gid app --shell /bin/false --create-home app)
 
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
 
-RUN chown -R www-data:www-data /app
+RUN chown -R app:app /app
 
 EXPOSE 8080
 
-# Run migrations as root, then switch to www-data for uWSGI
-CMD ["sh", "-c", "flask db upgrade && uwsgi --http-socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2 --uid 82 --gid 82"]
+# Run migrations as root, then switch to app user for uWSGI
+CMD ["sh", "-c", "flask db upgrade && uwsgi --http-socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2 --uid 1000 --gid 1000"]
