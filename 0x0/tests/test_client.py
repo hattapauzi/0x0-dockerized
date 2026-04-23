@@ -14,6 +14,10 @@ File = None
 URL = None
 TOKEN_RE = re.compile(r"^https://localhost/[A-Za-z0-9_-]{12}(?:\.[A-Za-z0-9._-]+)?\n$")
 
+
+def get_uploaded_path(response):
+    return response.data.decode().removeprefix("https://localhost/").strip()
+
 @pytest.fixture
 def client():
     global app, db, url_for, File, URL
@@ -61,13 +65,13 @@ def test_client(client):
             assert TOKEN_RE.match(location)
             paths.append(location.removeprefix("https://localhost/").strip())
 
-    assert paths[0] == paths[1]
+    assert paths[0] != paths[1]
     assert paths[0].endswith(".txt")
     assert paths[2].endswith(".truncate")
     assert paths[3].endswith(".tar.gz")
     assert paths[4].endswith(".txt")
 
-    f = File.query.get(2)
+    f = File.query.get(3)
     f.removed = True
     db.session.add(f)
     db.session.commit()
@@ -134,10 +138,38 @@ def test_uploaded_file_response_sets_nosniff(client):
         data={"file": (BytesIO(b"hello"), "hello.txt")},
     )
 
-    file_path = rv.data.decode().removeprefix("https://localhost/").strip()
+    file_path = get_uploaded_path(rv)
     rv = client.get(file_path)
     assert rv.status_code == 200
     assert rv.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_randomized_links_preserve_uploaded_filename_on_download(client):
+    first = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes"), "first-name.txt")},
+    )
+    second = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes"), "second name.txt")},
+    )
+
+    first_path = get_uploaded_path(first)
+    second_path = get_uploaded_path(second)
+
+    assert first_path != second_path
+
+    first_download = client.get(first_path)
+    second_download = client.get(second_path)
+
+    assert first_download.status_code == 200
+    assert second_download.status_code == 200
+    assert first_download.headers["Content-Disposition"] == 'attachment; filename="first-name.txt"'
+    assert second_download.headers["Content-Disposition"] == 'attachment; filename="second name.txt"'
 
 
 def test_uploaded_file_urls_use_long_random_tokens(client):

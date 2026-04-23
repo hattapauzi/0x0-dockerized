@@ -119,23 +119,28 @@ class URL(db.Model):
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key = True)
-    sha256 = db.Column(db.String, unique = True)
+    sha256 = db.Column(db.String)
     token = db.Column(db.String(32), unique = True, nullable = False)
     ext = db.Column(db.UnicodeText)
     mime = db.Column(db.UnicodeText)
     addr = db.Column(db.UnicodeText)
     removed = db.Column(db.Boolean, default=False)
     nsfw_score = db.Column(db.Float)
+    original_name = db.Column(db.UnicodeText)
 
-    def __init__(self, sha256, token, ext, mime, addr):
+    def __init__(self, sha256, token, ext, mime, addr, original_name=None):
         self.sha256 = sha256
         self.token = token
         self.ext = ext
         self.mime = mime
         self.addr = addr
+        self.original_name = original_name
 
     def getname(self):
         return u"{0}{1}".format(self.token, self.ext)
+
+    def getdownloadname(self):
+        return self.original_name or self.getname()
 
     def geturl(self):
         n = self.getname()
@@ -194,17 +199,21 @@ class File(db.Model):
 
             return ext[:app.config["FHOST_MAX_EXT_LENGTH"]] or ".bin"
 
-        f = File.query.filter_by(sha256=digest).first()
+        def get_original_name(ext):
+            original_name = Path(file_.filename or "").name
 
-        if f:
-            if f.removed:
-                abort(451)
-            if not f.token:
-                f.token = get_unique_token()
-        else:
-            mime = get_mime()
-            ext = get_ext(mime)
-            f = File(digest, get_unique_token(), ext, mime, addr)
+            if not original_name:
+                return f"file{ext}"
+
+            if not original_name.endswith(ext):
+                return f"{original_name}{ext}"
+
+            return original_name
+
+        mime = get_mime()
+        ext = get_ext(mime)
+        original_name = get_original_name(ext)
+        f = File(digest, get_unique_token(), ext, mime, addr, original_name=original_name)
 
         f.addr = addr
 
@@ -278,7 +287,7 @@ def build_file_response(f, fpath):
         response = send_from_directory(app.config["FHOST_STORAGE_PATH"], f.sha256, mimetype = f.mime)
 
     response.headers["Content-Type"] = f.mime
-    response.headers["Content-Disposition"] = f'attachment; filename="{f.getname()}"'
+    response.headers["Content-Disposition"] = f'attachment; filename="{f.getdownloadname()}"'
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
