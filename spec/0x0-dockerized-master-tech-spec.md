@@ -53,7 +53,7 @@ The available source guidance does not describe a formal legacy platform being r
 
 ## 3. Target Architecture Summary
 
-The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior.
+The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior. Within the upload path, randomized public links remain the external identifier while the original uploaded filename is preserved per upload for download responses.
 
 ### 3.1 Architectural Style
 
@@ -163,18 +163,21 @@ Implements the main Flask application behavior.
 - request handling and core app logic in `fhost.py`
 - upload behavior
 - retrieval behavior
-- URL generation behavior
-- response-header behavior
+- randomized URL generation behavior
+- response-header behavior, including filename-preserving download responses
 
 **Primary responsibilities**
 - serve the application’s main upload and retrieval workflows
 - preserve the current single-file application structure unless refactoring is necessary
+- generate randomized token-based public links for uploaded files
+- preserve the uploaded filename as per-upload metadata for download responses
 - align behavior changes with tests
 - support local development commands within `0x0/`
 
 **Technical notes**
 - this is the main application entrypoint named in the repository guidance
 - model names are expected to remain concise, such as `File` and `URL`
+- upload records may share the same stored file content hash while remaining distinct links when filename-preservation behavior requires per-upload metadata
 - surrounding code style should be matched carefully
 
 ## 5.3 Retention Cleanup Module (`0x0/cleanup.py`)
@@ -228,7 +231,8 @@ Provides user-facing rendering and automated verification.
 **Primary responsibilities**
 - render user-facing pages
 - validate upload and retrieval behavior
-- verify URL generation and response headers
+- verify randomized URL generation and response headers
+- verify preserved original filenames on download responses
 - prefer deterministic assertions such as token regex and HTTP status checks
 
 **Technical notes**
@@ -247,7 +251,7 @@ Provides user-facing rendering and automated verification.
 | Application core -> migrations | schema dependency | apply database upgrade history |
 | Application core -> templates | rendering dependency | serve user-facing pages |
 | Application core -> runtime data | persistence dependency | store upload and database runtime state |
-| Tests -> application core | verification dependency | validate upload, retrieval, URL, and header behavior |
+| Tests -> application core | verification dependency | validate upload, retrieval, randomized URL, and header behavior |
 
 ### 6.1 Interaction Rules
 
@@ -309,11 +313,13 @@ The repository distinguishes clearly between versioned source artifacts and runt
 
 ### 8.2 Entity Design Guidance
 
-The available guidance does not define the full application schema. The safe design guidance that is explicitly available is:
+The current application implementation confirms the following safe design guidance:
 - keep model names concise
 - preserve the current structural simplicity unless refactoring is necessary
 - align behavior changes with deterministic tests
 - treat migration history as the authoritative path for schema change
+- keep randomized link identity separate from preserved download filename metadata
+- allow multiple upload records to reference the same stored file content when per-upload filename preservation is required
 
 ### 8.3 Shared Technical Data Structures
 
@@ -321,6 +327,7 @@ The source guidance confirms the presence of:
 - upload runtime storage under `data/up/`
 - database runtime storage under `data/db/`
 - Alembic schema history under `migrations/`
+- per-upload file metadata that includes a randomized token and an optional preserved original filename for download responses
 
 Beyond that, concrete tables and relationships should be derived from code and migrations, not assumed here.
 
@@ -337,6 +344,8 @@ Direct file upload and retrieval are core to the repository’s intended scope.
 ### 9.1 Attachment Rules
 
 - uploaded content is runtime data and must remain outside version control
+- each successful upload should retain a randomized public link
+- each successful upload should preserve the uploaded filename for download behavior, even when stored content is deduplicated by hash
 - upload validation must be tested when behavior changes
 - retrieval behavior must be tested when response handling changes
 - URL generation behavior must be verified when link logic changes
@@ -357,6 +366,7 @@ The standard technical workflow implied by the source guidance is:
 - build and start the stack with Docker Compose
 - run cleanup through the maintenance profile when needed
 - verify upload behavior with curl
+- verify download headers when URL or filename behavior changes
 - for local development, create a virtualenv, install dev requirements, run DB upgrade, and execute pytest from `0x0/`
 
 ### 10.2 Review and Approval Design
@@ -429,7 +439,7 @@ Current reporting and validation sources are expected to include:
 
 ### 13.2 Performance
 
-The available source guidance does not define formal throughput or latency targets. The practical baseline is to preserve correct upload and retrieval behavior, avoid regressions in URL handling and response headers, and keep test coverage aligned with those behaviors.
+The available source guidance does not define formal throughput or latency targets. The practical baseline is to preserve correct upload and retrieval behavior, avoid regressions in randomized URL handling, preserved download filenames, and response headers, and keep test coverage aligned with those behaviors.
 
 ### 13.3 Reliability
 
@@ -510,7 +520,7 @@ This MTS should drive the following downstream artifacts:
 - a code-grounded architecture note for `fhost.py`
 - a schema inventory derived from `migrations/`
 - a maintenance runbook for cleanup behavior
-- a validation checklist covering upload handling, retrieval behavior, URL generation, and response headers
+- a validation checklist covering upload handling, retrieval behavior, randomized URL generation, preserved download filenames, and response headers
 - a hardening checklist covering secrets, runtime data, and restricted feature scope
 
 ---
