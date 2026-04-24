@@ -291,8 +291,22 @@ def build_file_response(f, fpath):
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
-@app.route("/<path:path>")
-def get(path):
+
+def should_preview_file(f):
+    return bool(f.mime and f.mime.startswith("text/"))
+
+
+def build_preview_response(f, fpath):
+    response = make_response(render_template(
+        "preview.html",
+        content=fpath.read_text(encoding="utf-8", errors="replace"),
+        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+    ))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def lookup_file(path):
     path = Path(path.split("/", 1)[0])
     sufs = "".join(path.suffixes[-2:])
     name = path.name[:-len(sufs) or None]
@@ -309,8 +323,25 @@ def get(path):
             if not fpath.is_file():
                 abort(404)
 
-            return build_file_response(f, fpath)
+            return f, fpath
+
     abort(404)
+
+
+@app.route("/download/<path:path>")
+def download(path):
+    f, fpath = lookup_file(path)
+    return build_file_response(f, fpath)
+
+
+@app.route("/<path:path>")
+def get(path):
+    f, fpath = lookup_file(path)
+
+    if should_preview_file(f):
+        return build_preview_response(f, fpath)
+
+    return build_file_response(f, fpath)
 
 @app.route("/", methods=["GET", "POST"])
 def fhost():

@@ -7,6 +7,7 @@ Create Date: 2026-04-23 23:40:00.000000
 """
 
 from alembic import op
+from alembic import context
 import sqlalchemy as sa
 
 
@@ -16,6 +17,8 @@ down_revision = '0d5b8c4b9f0d'
 
 
 def upgrade():
+    dialect_name = context.get_context().dialect.name
+
     op.create_table(
         'file_new',
         sa.Column('id', sa.Integer(), nullable=False),
@@ -38,15 +41,16 @@ def upgrade():
         FROM file
         """
     )
-    op.execute(
-        """
-        SELECT setval(
-            pg_get_serial_sequence('file_new', 'id'),
-            COALESCE((SELECT MAX(id) FROM file_new), 1),
-            (SELECT COUNT(*) > 0 FROM file_new)
+    if dialect_name == 'postgresql':
+        op.execute(
+            """
+            SELECT setval(
+                pg_get_serial_sequence('file_new', 'id'),
+                COALESCE((SELECT MAX(id) FROM file_new), 1),
+                (SELECT COUNT(*) > 0 FROM file_new)
+            )
+            """
         )
-        """
-    )
 
     op.drop_table('file')
     op.rename_table('file_new', 'file')
