@@ -24,9 +24,13 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from jinja2.exceptions import *
 from jinja2 import ChoiceLoader, FileSystemLoader
+from markupsafe import Markup
 from hashlib import sha256
 from magic import Magic
 from mimetypes import guess_extension
+import bleach
+import markdown
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -296,6 +300,68 @@ def should_preview_file(f):
     return bool(f.mime and f.mime.startswith("text/"))
 
 
+def should_render_markdown(f):
+    return bool(f.ext and f.ext.lower() == ".md")
+
+
+MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(?P<diagram>[\s\S]*?)\n```", re.IGNORECASE)
+MERMAID_PLACEHOLDER_RE = re.compile(r"<p>MERMAID_BLOCK_(?P<index>\d+)</p>")
+
+
+def extract_mermaid_blocks(content):
+    diagrams = []
+
+    def replace_block(match):
+        diagrams.append(match.group("diagram"))
+        return f"\n\nMERMAID_BLOCK_{len(diagrams) - 1}\n\n"
+
+    return MERMAID_BLOCK_RE.sub(replace_block, content), diagrams
+
+
+def render_markdown_with_mermaid(sanitized_html, diagrams):
+    def replace_placeholder(match):
+        diagram = diagrams[int(match.group("index"))]
+        return '<div class="mermaid">{}</div>'.format(bleach.clean(diagram, tags=[], strip=True))
+
+    return MERMAID_PLACEHOLDER_RE.sub(replace_placeholder, sanitized_html)
+
+
+def render_markdown(content):
+    markdown_source, mermaid_diagrams = extract_mermaid_blocks(content)
+    rendered_html = markdown.markdown(
+        markdown_source,
+        extensions=["fenced_code", "tables"],
+        output_format="html5",
+    )
+    sanitized_html = bleach.clean(
+        rendered_html,
+        tags=[
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li",
+            "blockquote", "pre", "code", "a", "strong", "em", "table", "thead",
+            "tbody", "tr", "th", "td", "br", "hr", "img",
+        ],
+        attributes={
+            "a": ["href", "title"],
+            "img": ["src", "alt", "title"],
+            "th": ["align"],
+            "td": ["align"],
+        },
+        protocols=["http", "https", "mailto"],
+        strip=True,
+    )
+    return Markup(render_markdown_with_mermaid(sanitized_html, mermaid_diagrams))
+
+
+def build_markdown_preview_response(f, fpath):
+    response = make_response(render_template(
+        "markdown_preview.html",
+        content=render_markdown(fpath.read_text(encoding="utf-8", errors="replace")),
+        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+    ))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def build_preview_response(f, fpath):
     response = make_response(render_template(
         "preview.html",
@@ -337,6 +403,9 @@ def download(path):
 @app.route("/<path:path>")
 def get(path):
     f, fpath = lookup_file(path)
+
+    if should_render_markdown(f):
+        return build_markdown_preview_response(f, fpath)
 
     if should_preview_file(f):
         return build_preview_response(f, fpath)

@@ -35,9 +35,9 @@
 
 ## Decision 4: Render Mermaid diagrams client-side with a pinned Mermaid asset
 
-**Decision**: Convert fenced `mermaid` code blocks into Mermaid diagram containers and initialize Mermaid client-side. Prefer a pinned local static asset if static asset handling is added; otherwise use a pinned CDN URL as an explicit implementation tradeoff.
+**Decision**: Convert fenced `mermaid` code blocks into Mermaid diagram containers and initialize Mermaid client-side using the pinned CDN asset `https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js` for this implementation.
 
-**Rationale**: Mermaid is designed for browser-side diagram rendering. Server-side rendering would require additional tooling and runtime complexity. Scoping Mermaid initialization to Markdown preview pages prevents Mermaid script loading on plain text previews.
+**Rationale**: Mermaid is designed for browser-side diagram rendering. Server-side rendering would require additional tooling and runtime complexity. Scoping Mermaid initialization to Markdown preview pages prevents Mermaid script loading on plain text previews. A pinned CDN URL avoids adding local static asset handling to the existing minimal Flask app while preserving a deterministic Mermaid version.
 
 **Alternatives considered**:
 - Server-side Mermaid rendering: rejected for initial implementation because it adds significant runtime/tooling complexity.

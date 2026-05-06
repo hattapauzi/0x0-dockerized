@@ -62,7 +62,7 @@ Open the returned URL in a browser and verify:
 
 - Markdown renders as a document.
 - Tables render visually as tables.
-- Mermaid diagrams render or are prepared in Mermaid diagram containers.
+- Mermaid diagrams render or are prepared in Mermaid diagram containers using pinned Mermaid.js `https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js`.
 - The top `Download` link is present.
 
 ## 5. Security Smoke Checks
