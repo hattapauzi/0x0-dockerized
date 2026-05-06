@@ -274,3 +274,192 @@ def test_uploaded_file_response_sets_nosniff(client):
     assert download.headers["X-Content-Type-Options"] == "nosniff"
 
 
+def test_markdown_upload_returns_md_url(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"# Title\n"), "README.md")},
+    )
+
+    assert rv.status_code == 200
+    assert get_uploaded_path(rv).endswith(".md")
+    assert TOKEN_RE.match(rv.data.decode())
+
+
+def test_markdown_preview_renders_common_markdown(client):
+    content = b"""# Heading
+
+Paragraph with [link](https://example.com).
+
+- one
+- two
+
+> quoted
+
+```python
+print('<safe>')
+```
+"""
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(content), "doc.md")},
+    )
+
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert "<h1>Heading</h1>" in html
+    assert '<p>Paragraph with <a href="https://example.com">link</a>.</p>' in html
+    assert "<ul>" in html
+    assert "<li>one</li>" in html
+    assert "<blockquote>" in html
+    assert "<pre><code" in html
+    assert "&lt;safe&gt;" in html
+
+
+def test_markdown_preview_renders_tables(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"| A | B |\n|---|---|\n| 1 | 2 |\n"), "table.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "<table>" in html
+    assert "<thead>" in html
+    assert "<tbody>" in html
+    assert "<tr>" in html
+    assert "<th>A</th>" in html
+    assert "<td>1</td>" in html
+
+
+def test_markdown_preview_download_link_preserves_filename(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"# Download me\n"), "original name.md")},
+    )
+
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+    download = client.get(get_download_path(html))
+
+    assert '<a href="https://localhost/download/' in html
+    assert ">Download</a>" in html
+    assert download.status_code == 200
+    assert download.headers["Content-Disposition"] == 'attachment; filename="original name.md"'
+
+
+def test_markdown_preview_renders_mermaid_container(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"```mermaid\ngraph TD\n  A-->B\n```\n"), "diagram.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert '<div class="mermaid">' in html
+    assert "graph TD" in html
+    assert "A--&gt;B" in html
+    assert "mermaid@10.9.1" in html
+    assert "mermaid.initialize" in html
+
+
+def test_markdown_preview_keeps_non_mermaid_code_as_code(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"```python\nprint('hello')\n```\n"), "code.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert '<div class="mermaid">' not in html
+    assert "<pre><code" in html
+    assert "print('hello')" in html
+
+
+def test_plain_text_preview_does_not_include_mermaid(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"```mermaid\ngraph TD\n```\n"), "plain.txt")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "mermaid@10.9.1" not in html
+    assert "mermaid.initialize" not in html
+    assert "```mermaid" in html
+
+
+def test_markdown_preview_sanitizes_script_tags(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"# Safe\n\nRegular Markdown paragraph before raw HTML.\n\n<script>alert('x')</script>\n"), "unsafe.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "<script>alert('x')</script>" not in html
+    assert "<script" not in html
+
+
+def test_markdown_preview_sanitizes_inline_event_attributes(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"<img src='https://example.com/x.png' onerror='alert(1)' onclick='alert(2)'>"), "events.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "onerror" not in html
+    assert "onclick" not in html
+    assert "onload" not in html
+
+
+def test_markdown_preview_sanitizes_javascript_urls(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"[bad](javascript:alert('x'))"), "link.md")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "javascript:" not in html
+
+
+def test_text_with_markdown_content_remains_plain_text(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"# Not rendered\n\n| A | B |\n|---|---|\n"), "markdown-looking.txt")},
+    )
+
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+
+    assert "<pre>" in html
+    assert "# Not rendered" in html
+    assert "<h1>Not rendered</h1>" not in html
+    assert "<table>" not in html
+
+
