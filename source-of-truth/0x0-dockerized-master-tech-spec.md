@@ -53,7 +53,7 @@ The available source guidance does not describe a formal legacy platform being r
 
 ## 3. Target Architecture Summary
 
-The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior. Within the upload path, randomized public links remain the external identifier while the original uploaded filename is preserved per upload for download responses. For eligible text-based files, the randomized link now opens a plain escaped preview page with a top `Download` hyperlink that serves the preserved-filename attachment response.
+The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior. Within the upload path, randomized public links remain the external identifier while the original uploaded filename is preserved per upload for download responses. For eligible text-based files, the randomized link opens a server-rendered preview page with a top `Download` hyperlink. Text files with the `.md` extension render as Markdown HTML with sanitized output, table support, and client-side Mermaid diagram rendering for fenced `mermaid` blocks; other text files render as plain escaped HTML.
 
 ### 3.1 Architectural Style
 
@@ -164,7 +164,8 @@ Implements the main Flask application behavior.
 - upload behavior
 - retrieval behavior
 - randomized URL generation behavior
-- plain text preview behavior for eligible text files
+- plain escaped preview for other text-based files
+- server-rendered Markdown preview with Mermaid diagram support for `.md` uploads
 - response-header behavior, including filename-preserving download responses
 
 **Primary responsibilities**
@@ -172,7 +173,8 @@ Implements the main Flask application behavior.
 - preserve the current single-file application structure unless refactoring is necessary
 - generate randomized token-based public links for uploaded files
 - preserve the uploaded filename as per-upload metadata for download responses
-- render a plain escaped preview page for eligible text-based files at the randomized link
+- render a plain escaped preview page for eligible non-Markdown text-based files
+- render a Markdown preview page with sanitized HTML, table styling, and Mermaid diagram containers for `.md` uploads
 - expose an explicit download path for preserved-filename attachment responses
 - align behavior changes with tests
 - support local development commands within `0x0/`
@@ -350,7 +352,8 @@ Direct file upload and retrieval are core to the repository’s intended scope.
 - uploaded content is runtime data and must remain outside version control
 - each successful upload should retain a randomized public link
 - each successful upload should preserve the uploaded filename for download behavior, even when stored content is deduplicated by hash
-- eligible text-based file links should render a plain escaped preview page with a top `Download` hyperlink
+- eligible text files with `.md` extension render as Markdown with Bleach sanitization, fenced code blocks, tables, and client-side Mermaid diagram rendering
+- eligible text files without `.md` extension render as plain escaped HTML with a top `Download` hyperlink
 - non-text file links should continue to return direct attachment responses
 - upload validation must be tested when behavior changes
 - retrieval behavior must be tested when response handling changes
