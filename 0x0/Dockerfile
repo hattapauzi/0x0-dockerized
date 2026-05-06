@@ -1,5 +1,4 @@
 FROM python:3.10-slim
-FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -16,9 +15,12 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
 
-RUN chown -R app:app /app
+RUN chmod +x /app/docker-entrypoint.sh \
+	&& chown -R app:app /app
 
 EXPOSE 8080
 
-# Run migrations as root, then switch to app user for uWSGI
+# Fix bind-mounted upload directory ownership, run migrations as root, then switch to app user for uWSGI
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["sh", "-c", "flask db upgrade && uwsgi --http-socket 0.0.0.0:8080 --wsgi-file fhost.py --callable app --processes 4 --threads 2 --uid 1000 --gid 1000"]
+
