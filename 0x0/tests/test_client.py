@@ -259,6 +259,55 @@ def test_uploaded_file_urls_use_long_random_tokens(client):
     assert TOKEN_RE.match(rv.data.decode())
 
 
+def test_dotted_filenames_keep_real_file_extension_in_public_url(client):
+    pdf = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={
+            "file": (
+                BytesIO(b"%PDF-1.4 dummy receipt"),
+                "cepat.smartselangor.com.my_fpx-receipt.pdf",
+            )
+        },
+    )
+    video = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={
+            "file": (
+                BytesIO(b"\x00\x00\x00\x18ftypmp42"),
+                "Sophia_Xing_-_The_AI_labs_finally_made_peace._Jensen_brought_the_chips._created_in_b5xhFt.mp4",
+            )
+        },
+    )
+
+    pdf_path = get_uploaded_path(pdf)
+    video_path = get_uploaded_path(video)
+
+    assert pdf.status_code == 200
+    assert video.status_code == 200
+    assert pdf_path.endswith(".pdf")
+    assert not pdf_path.endswith(".my_fpx-r")
+    assert video_path.endswith(".mp4")
+    assert not video_path.endswith("._created")
+    assert TOKEN_RE.match(pdf.data.decode())
+    assert TOKEN_RE.match(video.data.decode())
+
+    pdf_download = client.get(f"/download/{pdf_path}")
+    video_download = client.get(f"/download/{video_path}")
+
+    assert pdf_download.status_code == 200
+    assert video_download.status_code == 200
+    assert pdf_download.headers["Content-Disposition"] == (
+        'attachment; filename="cepat.smartselangor.com.my_fpx-receipt.pdf"'
+    )
+    assert video_download.headers["Content-Disposition"] == (
+        'attachment; filename="Sophia_Xing_-_The_AI_labs_finally_made_peace._Jensen_brought_the_chips._created_in_b5xhFt.mp4"'
+    )
+
+
 def test_uploaded_file_response_sets_nosniff(client):
     rv = client.post(
         "/",

@@ -189,9 +189,11 @@ class File(db.Model):
             return mime
 
         def get_ext(mime):
-            ext = "".join(Path(file_.filename).suffixes[-2:])
+            suffixes = Path(file_.filename or "").suffixes[-2:]
+            ext = "".join(suffixes)
             gmime = mime.split(";")[0]
             guess = guess_extension(gmime)
+            max_len = app.config["FHOST_MAX_EXT_LENGTH"]
 
             app.logger.debug(f"extension - specified: '{ext}' - detected: '{guess}'")
 
@@ -201,7 +203,12 @@ class File(db.Model):
                 else:
                     ext = guess_extension(gmime)
 
-            return ext[:app.config["FHOST_MAX_EXT_LENGTH"]] or ".bin"
+            # Extra dots in a basename are not a compound extension. Keep
+            # short pairs such as .tar.gz, otherwise use only the last suffix.
+            if ext and len(ext) > max_len and len(suffixes) > 1:
+                ext = suffixes[-1]
+
+            return ext[:max_len] or ".bin"
 
         def get_original_name(ext):
             original_name = Path(file_.filename or "").name
