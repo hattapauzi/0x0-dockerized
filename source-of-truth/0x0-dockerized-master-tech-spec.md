@@ -1,6 +1,6 @@
 # 0x0-Dockerized Master Technical Specification (MTS)
-Version: v0.1  
-Status: Draft  
+Version: v1.0  
+Status: Approved Baseline  
 Source Baseline: `AGENTS.md` Repository Guidelines  
 Format: Markdown-first working specification
 
