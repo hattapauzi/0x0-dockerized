@@ -311,6 +311,10 @@ def should_render_markdown(f):
     return bool(f.ext and f.ext.lower() == ".md")
 
 
+def should_preview_video(f):
+    return bool(f.mime and f.mime.startswith("video/"))
+
+
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(?P<diagram>[\s\S]*?)\n```", re.IGNORECASE)
 MERMAID_PLACEHOLDER_RE = re.compile(r"<p>MERMAID_BLOCK_(?P<index>\d+)</p>")
 
@@ -379,6 +383,16 @@ def build_preview_response(f, fpath):
     return response
 
 
+def build_video_preview_response(f, fpath):
+    response = make_response(render_template(
+        "video_preview.html",
+        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        mime=f.mime,
+    ))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def lookup_file(path):
     path = Path(path.split("/", 1)[0])
     sufs = "".join(path.suffixes[-2:])
@@ -413,6 +427,9 @@ def get(path):
 
     if should_render_markdown(f):
         return build_markdown_preview_response(f, fpath)
+
+    if should_preview_video(f):
+        return build_video_preview_response(f, fpath)
 
     if should_preview_file(f):
         return build_preview_response(f, fpath)

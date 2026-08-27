@@ -512,3 +512,48 @@ def test_text_with_markdown_content_remains_plain_text(client):
     assert "<table>" not in html
 
 
+def test_video_upload_renders_player_preview_with_download_link(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\x00\x00\x00\x18ftypmp42"), "clip.mp4")},
+    )
+
+    preview_path = get_uploaded_path(rv)
+    preview = client.get(preview_path)
+    preview_html = preview.get_data(as_text=True)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="https://localhost/download/' in preview_html
+    assert ">Download</a>" in preview_html
+    assert "<video controls" in preview_html
+    assert '<source src="https://localhost/download/' in preview_html
+    assert 'type="video/mp4"' in preview_html
+
+    download = client.get(get_download_path(preview_html))
+
+    assert download.status_code == 200
+    assert download.mimetype == "video/mp4"
+    assert download.headers["Content-Disposition"] == 'attachment; filename="clip.mp4"'
+
+
+def test_webm_upload_renders_player_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\x1a\x45\xdf\xa3\x93\x42\x82\x84webm"), "clip.webm")},
+    )
+
+    preview = client.get(get_uploaded_path(rv))
+    preview_html = preview.get_data(as_text=True)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert "<video controls" in preview_html
+    assert 'type="video/webm"' in preview_html
+
+
