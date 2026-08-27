@@ -53,7 +53,7 @@ The available source guidance does not describe a formal legacy platform being r
 
 ## 3. Target Architecture Summary
 
-The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior. Within the upload path, randomized public links remain the external identifier while the original uploaded filename is preserved per upload for download responses. For eligible text-based files, the randomized link opens a server-rendered preview page with a top `Download` hyperlink. Text files with the `.md` extension render as Markdown HTML with sanitized output, table support, and client-side Mermaid diagram rendering for fenced `mermaid` blocks; other text files render as plain escaped HTML.
+The target architecture is a Docker-oriented repository with a root-level deployment wrapper, a nested Flask application, a maintenance path for cleanup, filesystem-backed runtime data, relational persistence managed through migrations, and a pytest-based validation layer focused on upload and retrieval behavior. Within the upload path, randomized public links remain the external identifier while the original uploaded filename is preserved per upload for download responses. For eligible text-based files, the randomized link opens a server-rendered preview page with a top `Download` hyperlink. Text files with the `.md` extension render as Markdown HTML with sanitized output, table support, and client-side Mermaid diagram rendering for fenced `mermaid` blocks; other text files render as plain escaped HTML. Video uploads render as a server-rendered preview page with a native HTML5 player and a top `Download` hyperlink, while the dedicated download path continues to return attachment responses.
 
 ### 3.1 Architectural Style
 
@@ -166,6 +166,7 @@ Implements the main Flask application behavior.
 - randomized URL generation behavior
 - plain escaped preview for other text-based files
 - server-rendered Markdown preview with Mermaid diagram support for `.md` uploads
+- video playback preview with a native HTML5 player for `video/*` uploads
 - response-header behavior, including filename-preserving download responses
 
 **Primary responsibilities**
@@ -175,6 +176,7 @@ Implements the main Flask application behavior.
 - preserve the uploaded filename as per-upload metadata for download responses
 - render a plain escaped preview page for eligible non-Markdown text-based files
 - render a Markdown preview page with sanitized HTML, table styling, and Mermaid diagram containers for `.md` uploads
+- render a video playback preview page with a native HTML5 player and top download link for eligible video files
 - expose an explicit download path for preserved-filename attachment responses
 - align behavior changes with tests
 - support local development commands within `0x0/`
@@ -325,7 +327,7 @@ The current application implementation confirms the following safe design guidan
 - treat migration history as the authoritative path for schema change
 - keep randomized link identity separate from preserved download filename metadata
 - allow multiple upload records to reference the same stored file content when per-upload filename preservation is required
-- allow eligible text files to use the randomized link as a preview entrypoint while attachment delivery remains available through a dedicated download path
+- allow eligible text files and video files to use the randomized link as a preview entrypoint while attachment delivery remains available through a dedicated download path
 
 ### 8.3 Shared Technical Data Structures
 
@@ -354,7 +356,8 @@ Direct file upload and retrieval are core to the repository’s intended scope.
 - each successful upload should preserve the uploaded filename for download behavior, even when stored content is deduplicated by hash
 - eligible text files with `.md` extension render as Markdown with Bleach sanitization, fenced code blocks, tables, and client-side Mermaid diagram rendering
 - eligible text files without `.md` extension render as plain escaped HTML with a top `Download` hyperlink
-- non-text file links should continue to return direct attachment responses
+- eligible video files render as a preview page with a native HTML5 player and a top `Download` hyperlink
+- non-text, non-video file links should continue to return direct attachment responses
 - upload validation must be tested when behavior changes
 - retrieval behavior must be tested when response handling changes
 - URL generation behavior must be verified when link logic changes
@@ -376,7 +379,7 @@ The standard technical workflow implied by the source guidance is:
 - run cleanup through the maintenance profile when needed
 - verify upload behavior with curl
 - verify download headers when URL or filename behavior changes
-- verify text preview rendering and top-of-page download links when preview behavior changes
+- verify text and video preview rendering and top-of-page download links when preview behavior changes
 - for local development, create a virtualenv, install dev requirements, run DB upgrade, and execute pytest from `0x0/`
 
 ### 10.2 Review and Approval Design
