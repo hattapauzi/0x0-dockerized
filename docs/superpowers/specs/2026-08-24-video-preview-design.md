@@ -18,7 +18,7 @@ Order after `lookup_file` (`0x0/fhost.py:382`):
 3. `should_preview_file(f)` → `build_preview_response`
 4. fallback → `build_file_response` (`0x0/fhost.py:292`)
 
-`download(path)` at `0x0/fhost.py:404` unchanged. No new route. If `FHOST_USE_X_ACCEL_REDIRECT` is later enabled, no change needed for preview.
+`download(path)` at `0x0/fhost.py:404` unchanged. No new route. If `FHOST_USE_X_ACCEL_REDIRECT` is later enabled, no change is needed for the preview page itself; nginx then fronts the `/download/` byte serving and handles Range requests by default.
 
 ## Template `0x0/templates/video_preview.html`
 Standalone HTML (like `markdown_preview.html:1`), inline `<style>`, no external assets:
@@ -29,7 +29,7 @@ Standalone HTML (like `markdown_preview.html:1`), inline `<style>`, no external 
 ## Data Flow
 1. Upload → `File.store` detects MIME via `python-magic` (`0x0/fhost.py:172`), ext via `FHOST_EXT_OVERRIDE`/`guess_extension` (`0x0/fhost.py:191`), persisted as `File.mime/ext`.
 2. `GET /<token>.mp4` → `lookup_file` validates token+ext, checks `removed`/file existence → video check → `video_preview.html` with `download_url` pointing at `/download/<token>.mp4`.
-3. Browser loads preview HTML, then fetches `<source src>` from `/download/` via `build_file_response` (`send_from_directory` at `0x0/fhost.py:298` + `Content-Type`/`Content-Disposition: attachment` at `0x0/fhost.py:300`). For `<video>` subresource fetches, browsers ignore `attachment` and play inline. Flask 3.1 `send_file` handles `Range`/`206` for seeking.
+3. Browser loads preview HTML, then fetches `<source src>` from `/download/` via `build_file_response` (`send_from_directory` at `0x0/fhost.py:298` + `Content-Type`/`Content-Disposition: attachment` at `0x0/fhost.py:300`). For `<video>` subresource fetches, browsers ignore `attachment` and play inline. This is current Chrome/Firefox behavior and may vary by browser/engine, but the failure mode stays graceful — the Download link always works regardless. Flask 3.1 `send_file` handles `Range`/`206` for seeking.
 
 ## Error Handling / Edge Cases
 - Non-playable container (e.g. `.avi`, `video/x-msvideo`): native `<video>` shows browser error; Download link remains functional — same hosting-service UX.
@@ -43,11 +43,18 @@ Standalone HTML (like `markdown_preview.html:1`), inline `<style>`, no external 
 - No user-controlled HTML in template beyond the URL/mime.
 
 ## Testing
-Extend `0x0/tests/test_client.py` (patterns at `0x0/tests/test_client.py:150`, `0x0/tests/test_client.py:191`):
+Extend `0x0/tests/test_client.py` (patterns at `0x0/tests/test_client.py:150`, `0x0/tests/test_client.py:191`). MIME is detected from bytes via `python-magic` (`0x0/fhost.py:172`) and takes precedence over the declared `content_type`, so tests must use byte payloads that sniff to the desired video MIME:
+- mp4: reuse the proven `b"\x00\x00\x00\x18ftypmp42"` payload (`0x0/tests/test_client.py:280`) → sniffs `video/mp4`, ext `.mp4`.
+- webm: minimal EBML + DocType header, e.g. `b"\x1a\x45\xdf\xa3\x93\x42\x82\x84webm"` → sniffs `video/webm`.
+
+Cases:
 - Upload `video/mp4` → `GET /<path>` returns `200` `text/html` with `<video`, `controls`, `<source type="video/mp4">`, top Download link, `X-Content-Type-Options: nosniff`; `GET` on extracted download URL returns `200` `video/mp4` with `Content-Disposition: attachment; filename="..."`.
 - Upload `video/webm` similarly.
 - Non-video (e.g. `image/png` at `0x0/tests/test_client.py:191`) still returns direct attachment (no `<video>`).
 - Text/markdown previews unchanged.
+
+## Documentation Deliverable
+Per repo convention (e.g. commits `a35063d`, `1569e20`), update `source-of-truth/0x0-dockerized-master-tech-spec.md` to record the new video preview behavior alongside the existing text/markdown preview descriptions, so the master spec stays the source of truth.
 
 ## Non-Goals
 - No video.js/CDN, no custom controls, no transcoding, no poster/thumbnail generation, no audio preview expansion, no filename/size/copy-link extras, no new `/stream` route, no analytics distinction between views and downloads.
