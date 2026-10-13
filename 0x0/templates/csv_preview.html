@@ -6,6 +6,19 @@
   <title>CSV preview</title>
 </head>
 <body>
-  <p><a href="{{ download_url }}">Download</a></p>
+  <p>
+    <a href="{{ download_url }}">Download</a>
+    {% if rows > 0 %}
+    <label>Row <input type="number" min="1" max="{{ rows }}"></label>
+    {% endif %}
+  </p>
+  {% if stopped %}
+  <p>Couldn't read past row {{ rows }}.</p>
+  {% elif rows == 0 %}
+  <p>Empty file.</p>
+  {% endif %}
+  <script>
+    const CFG = {{ {"rows": rows, "cols": cols, "dataUrl": data_url} | tojson }};
+  </script>
 </body>
 </html>

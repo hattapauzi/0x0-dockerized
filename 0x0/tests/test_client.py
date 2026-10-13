@@ -617,3 +617,106 @@ def test_txt_with_commas_stays_plain_text_preview(client):
     assert "const CFG" not in html
 
 
+def test_csv_preview_empty_file_message(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b""), "empty.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." in html
+    assert "Couldn't read past row" not in html
+    assert 'class="scrollbox"' not in html
+    assert 'type="number"' not in html
+    cfg = get_csv_cfg(html)
+    assert cfg["rows"] == 0
+    assert cfg["cols"] == 0
+
+
+def test_csv_preview_bom_only_is_empty(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\xef\xbb\xbf"), "bom.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_bom_plus_newline_is_one_row(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\xef\xbb\xbf\n"), "bomnl.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." not in html
+    assert get_csv_cfg(html)["rows"] == 1
+
+
+def test_csv_preview_cr_only_stops_at_row_zero(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\r"), "mac.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 0." in html
+    assert "Empty file." not in html
+    assert 'class="scrollbox"' not in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_huge_field_keeps_prior_rows(client):
+    payload = b"a\nb\n" + b"x" * 131073 + b"\n"
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "widefield.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 2." in html
+    assert get_csv_cfg(html)["rows"] == 2
+
+
+def test_csv_preview_overlong_line_stops_at_row_zero(client):
+    payload = b"x" * (4 * 1024 * 1024 + 1)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "longline.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 0." in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_index_is_reused_on_second_get(client, monkeypatch):
+    fhost = sys.modules["fhost"]
+    calls = {"n": 0}
+    real = fhost._scan_csv_file
+
+    def wrapped(fpath):
+        calls["n"] += 1
+        return real(fpath)
+
+    monkeypatch.setattr(fhost, "_scan_csv_file", wrapped)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "reuse.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+    client.get(path)
+    assert calls["n"] == 1
+
+

@@ -29,10 +29,16 @@ from hashlib import sha256
 from magic import Magic
 from mimetypes import guess_extension
 import bleach
+import csv
+import fcntl
+import json
 import markdown
+import os
 import re
 import secrets
+import struct
 import sys
+import threading
 from pathlib import Path
 
 app = Flask(__name__, instance_relative_config=True)
@@ -397,10 +403,140 @@ def build_video_preview_response(f, fpath):
     return response
 
 
+CSV_BLOCK_ROWS = 200
+CSV_TILE_COLS = 50
+CSV_CELL_PREVIEW_CHARS = 50
+CSV_MAX_LINE_BYTES = 4 * 1024 * 1024
+CSV_INDEX_HEADER = struct.Struct("<QQQ")
+CSV_INDEX_OFFSET = struct.Struct("<Q")
+CSV_BOM = b"\xef\xbb\xbf"
+
+
+def _csv_index_dir():
+    return Path(app.config["FHOST_STORAGE_PATH"]) / ".csv-index"
+
+
+def _write_csv_index(path, rows, cols, stopped, offsets):
+    payload = CSV_INDEX_HEADER.pack(rows, cols, 1 if stopped else 0)
+    payload += b"".join(CSV_INDEX_OFFSET.pack(off) for off in offsets)
+    path.write_bytes(payload)
+
+
+def _read_csv_index(path):
+    data = path.read_bytes()
+    rows, cols, stopped = CSV_INDEX_HEADER.unpack_from(data, 0)
+    n = (len(data) - CSV_INDEX_HEADER.size) // CSV_INDEX_OFFSET.size
+    offsets = [
+        CSV_INDEX_OFFSET.unpack_from(data, CSV_INDEX_HEADER.size + i * CSV_INDEX_OFFSET.size)[0]
+        for i in range(n)
+    ]
+    return rows, cols, bool(stopped), offsets
+
+
+def _scan_csv_file(fpath):
+    size = fpath.stat().st_size
+    if size == 0:
+        return 0, 0, False, []
+    if size == 3 and fpath.read_bytes() == CSV_BOM:
+        return 0, 0, False, []
+
+    rows = 0
+    cols = 0
+    stopped = False
+    offsets = []
+    pos = 0
+    first_line = True
+    oversize = False
+
+    def lines(raw):
+        nonlocal pos, first_line, oversize
+        while True:
+            line = raw.readline()
+            if not line:
+                return
+            if len(line) > CSV_MAX_LINE_BYTES:
+                oversize = True
+                return
+            pos += len(line)
+            text = line.decode("utf-8", "replace")
+            if first_line:
+                if text.startswith("\ufeff"):
+                    text = text[1:]
+                first_line = False
+            # Python 3.14 treats a lone \r as an empty row; older csv raised Error.
+            if "\r" in text and not text.endswith("\n"):
+                raise csv.Error("CR line ending")
+            yield text
+
+    try:
+        with open(fpath, "rb") as raw:
+            reader = csv.reader(lines(raw))
+            while True:
+                start = pos
+                try:
+                    row = next(reader)
+                except StopIteration:
+                    break
+                if oversize:
+                    stopped = True
+                    break
+                if rows % CSV_BLOCK_ROWS == 0:
+                    offsets.append(start)
+                rows += 1
+                if len(row) > cols:
+                    cols = len(row)
+            if oversize:
+                stopped = True
+    except csv.Error:
+        stopped = True
+
+    return rows, cols, stopped, offsets
+
+
+def csv_index(fpath):
+    index_path = _csv_index_dir() / fpath.name
+    if index_path.is_file():
+        rows, cols, stopped, _ = _read_csv_index(index_path)
+        return rows, cols, stopped, index_path
+
+    _csv_index_dir().mkdir(parents=True, exist_ok=True)
+
+    try:
+        raw = open(fpath, "rb")
+    except FileNotFoundError:
+        abort(404)
+
+    try:
+        fcntl.flock(raw.fileno(), fcntl.LOCK_EX)
+        if index_path.is_file():
+            rows, cols, stopped, _ = _read_csv_index(index_path)
+            return rows, cols, stopped, index_path
+
+        rows, cols, stopped, offsets = _scan_csv_file(fpath)
+        # Name must be <sha256>.tmp-<pid>-<thread> so cleanup's split(".")[0] is the sha.
+        tmp = _csv_index_dir() / "{}.tmp-{}-{}".format(fpath.name, os.getpid(), threading.get_ident())
+        try:
+            _write_csv_index(tmp, rows, cols, stopped, offsets)
+            os.replace(str(tmp), str(index_path))
+        except FileNotFoundError:
+            abort(404)
+        return rows, cols, stopped, index_path
+    finally:
+        raw.close()
+
+
 def build_csv_preview_response(f, fpath):
+    try:
+        rows, cols, stopped, _ = csv_index(fpath)
+    except FileNotFoundError:
+        abort(404)
     response = make_response(render_template(
         "csv_preview.html",
+        rows=rows,
+        cols=cols,
+        stopped=stopped,
         download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        data_url="",
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
