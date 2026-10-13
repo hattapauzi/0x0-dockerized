@@ -720,3 +720,108 @@ def test_csv_index_is_reused_on_second_get(client, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_csv_tile_parses_quoted_fields_and_escapes(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(
+            b'\xef\xbb\xbfname,note\n'
+            b'Ada,"hello, world"\n'
+            b'Bea,"line1\nline2"\n'
+            b'Cal,"a""b"\n'
+            b'\n'
+            b'1\n'
+            b'<b>,x\n'
+        ), "edges.csv")},
+    )
+    path = get_uploaded_path(rv)
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"})
+    assert tile.status_code == 200
+    assert tile.mimetype == "application/json"
+    assert tile.headers["X-Content-Type-Options"] == "nosniff"
+    rows = tile.get_json()["rows"]
+    assert rows[0] == ["name", "note"]
+    assert rows[1] == ["Ada", "hello, world"]
+    assert rows[2] == ["Bea", "line1\nline2"]
+    assert rows[3] == ["Cal", 'a"b']
+    assert rows[4] == []
+    assert rows[5] == ["1"]
+    assert rows[6] == ["<b>", "x"]
+
+
+def test_csv_tile_straddling_quoted_newline_at_block_boundary(client):
+    lines = [b"h\n"]
+    # rows 1..199 ordinary; row 200 (0-based) starts with a quoted newline so block 1 must resume mid-record
+    lines.extend(b"%d\n" % i for i in range(1, 200))
+    lines.append(b'"a\nb"\n')
+    payload = b"".join(lines)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "span.csv")},
+    )
+    path = get_uploaded_path(rv)
+    assert get_csv_cfg(client.get(path).get_data(as_text=True))["rows"] == 201
+    tile = client.get("/csv/" + path, query_string={"rb": "1", "cb": "0"})
+    assert tile.get_json()["rows"] == [["a\nb"]]
+
+
+def test_csv_cell_returns_full_text_tile_truncates(client):
+    cell = "x" * 60
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(("a\n" + cell + "\n").encode()), "long.csv")},
+    )
+    path = get_uploaded_path(rv)
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).get_json()
+    assert tile["rows"][1] == ["x" * 50]
+    full = client.get("/csv/" + path, query_string={"r": "1", "c": "0"}).get_json()
+    assert full["text"] == cell
+
+
+def test_csv_tile_bounds_and_bad_params(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "bounds.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+    base = "/csv/" + path
+    assert client.get(base, query_string={"rb": "1", "cb": "0"}).get_json() == {"rows": []}
+    assert client.get(base, query_string={"rb": "0", "cb": "1"}).get_json() == {"rows": [[], []]}
+    assert client.get(base, query_string={"r": "9", "c": "0"}).get_json() == {"text": ""}
+    assert client.get(base, query_string={"r": "0", "c": "9"}).get_json() == {"text": ""}
+    assert client.get(base, query_string={"rb": "0"}).status_code == 400
+    assert client.get(base, query_string={"rb": "-1", "cb": "0"}).status_code == 400
+    assert client.get(base).status_code == 400
+
+
+def test_csv_data_rejects_non_csv_and_removed(client):
+    txt = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"hello\n"), "plain.txt")},
+    )
+    assert client.get("/csv/" + get_uploaded_path(txt), query_string={"rb": "0", "cb": "0"}).status_code == 404
+
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a\n"), "gone.csv")},
+    )
+    path = get_uploaded_path(rv)
+    token = path[:-4]
+    f = File.query.filter_by(token=token).first()
+    f.removed = True
+    db.session.commit()
+    assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 451
+
+

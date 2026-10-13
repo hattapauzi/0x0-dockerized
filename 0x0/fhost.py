@@ -525,6 +525,62 @@ def csv_index(fpath):
         raw.close()
 
 
+def _parse_csv_from(fpath, offset, count, strip_bom):
+    rows = []
+    first_line = True
+
+    def lines(raw):
+        nonlocal first_line
+        while True:
+            line = raw.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", "replace")
+            if first_line and strip_bom and text.startswith("\ufeff"):
+                text = text[1:]
+            first_line = False
+            yield text
+
+    with open(fpath, "rb") as raw:
+        raw.seek(offset)
+        reader = csv.reader(lines(raw))
+        for _ in range(count):
+            try:
+                rows.append(next(reader))
+            except (StopIteration, csv.Error):
+                break
+    return rows
+
+
+def csv_rows(fpath, index_path, start_row, count):
+    rows, cols, stopped, offsets = _read_csv_index(index_path)
+    if start_row >= rows or count <= 0:
+        return []
+    block = start_row // CSV_BLOCK_ROWS
+    skip = start_row % CSV_BLOCK_ROWS
+    offset = offsets[block]
+    parsed = _parse_csv_from(
+        fpath, offset, skip + min(count, rows - start_row), strip_bom=(offset == 0)
+    )
+    return parsed[skip:]
+
+
+def _csv_json(payload):
+    response = make_response(json.dumps(payload, ensure_ascii=False))
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _csv_int_arg(name):
+    if name not in request.args:
+        return None
+    raw = request.args[name]
+    if not re.fullmatch(r"[0-9]+", raw):
+        abort(400)
+    return int(raw)
+
+
 def build_csv_preview_response(f, fpath):
     try:
         rows, cols, stopped, _ = csv_index(fpath)
@@ -536,7 +592,7 @@ def build_csv_preview_response(f, fpath):
         cols=cols,
         stopped=stopped,
         download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
-        data_url="",
+        data_url=url_for("csv_data", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -568,6 +624,50 @@ def lookup_file(path):
 def download(path):
     f, fpath = lookup_file(path)
     return build_file_response(f, fpath)
+
+
+@app.route("/csv/<path:path>")
+def csv_data(path):
+    f, fpath = lookup_file(path)
+    if not should_render_csv(f):
+        abort(404)
+    try:
+        nrows, ncols, stopped, index_path = csv_index(fpath)
+    except FileNotFoundError:
+        abort(404)
+
+    try:
+        if "r" in request.args or "c" in request.args:
+            r = _csv_int_arg("r")
+            c = _csv_int_arg("c")
+            if r is None or c is None:
+                abort(400)
+            if r >= nrows or c >= ncols:
+                return _csv_json({"text": ""})
+            row = csv_rows(fpath, index_path, r, 1)
+            if not row or c >= len(row[0]):
+                return _csv_json({"text": ""})
+            return _csv_json({"text": row[0][c]})
+
+        rb = _csv_int_arg("rb")
+        cb = _csv_int_arg("cb")
+        if rb is None or cb is None:
+            abort(400)
+        start = rb * CSV_BLOCK_ROWS
+        if start >= nrows:
+            return _csv_json({"rows": []})
+        n = min(CSV_BLOCK_ROWS, nrows - start)
+        col0 = cb * CSV_TILE_COLS
+        if col0 >= ncols:
+            return _csv_json({"rows": [[] for _ in range(n)]})
+        parsed = csv_rows(fpath, index_path, start, n)
+        out = []
+        for row in parsed:
+            slice_ = row[col0:col0 + CSV_TILE_COLS]
+            out.append([cell[:CSV_CELL_PREVIEW_CHARS] for cell in slice_])
+        return _csv_json({"rows": out})
+    except FileNotFoundError:
+        abort(404)
 
 
 @app.route("/<path:path>")
