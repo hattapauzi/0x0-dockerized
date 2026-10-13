@@ -3,6 +3,7 @@ import tempfile
 import os
 import sys
 import importlib
+import json
 import re
 from urllib.parse import urlparse
 from flask_migrate import upgrade as db_upgrade
@@ -24,6 +25,12 @@ def get_download_path(html):
     match = re.search(r'href="([^"]+)"', html)
     assert match is not None
     return urlparse(match.group(1)).path
+
+
+def get_csv_cfg(html):
+    match = re.search(r"const CFG = (\{.*?\});", html, re.DOTALL)
+    assert match is not None
+    return json.loads(match.group(1))
 
 @pytest.fixture
 def client():
@@ -555,5 +562,58 @@ def test_webm_upload_renders_player_preview(client):
     assert preview.mimetype == "text/html"
     assert "<video controls" in preview_html
     assert 'type="video/webm"' in preview_html
+
+
+def test_csv_upload_renders_table_preview_with_download_link(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "sheet.csv")},
+    )
+    preview_path = get_uploaded_path(rv)
+    preview = client.get(preview_path)
+    html = preview.get_data(as_text=True)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="https://localhost/download/' in html
+    assert ">Download</a>" in html
+    assert "<pre>" not in html
+
+    download = client.get(get_download_path(html))
+    assert download.status_code == 200
+    assert download.headers["Content-Disposition"] == 'attachment; filename="sheet.csv"'
+    assert download.get_data() == b"a,b\n1,2\n"
+
+
+def test_compound_csv_extension_gets_table_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n"), "report.2024.csv")},
+    )
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert ">Download</a>" in html
+    assert "<pre>" not in html
+
+
+def test_txt_with_commas_stays_plain_text_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "notes.txt")},
+    )
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+    assert "<pre>" in html
+    assert "a,b" in html
+    assert "const CFG" not in html
 
 
