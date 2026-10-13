@@ -422,15 +422,29 @@ def _write_csv_index(path, rows, cols, stopped, offsets):
     path.write_bytes(payload)
 
 
-def _read_csv_index(path):
-    data = path.read_bytes()
-    rows, cols, stopped = CSV_INDEX_HEADER.unpack_from(data, 0)
-    n = (len(data) - CSV_INDEX_HEADER.size) // CSV_INDEX_OFFSET.size
-    offsets = [
-        CSV_INDEX_OFFSET.unpack_from(data, CSV_INDEX_HEADER.size + i * CSV_INDEX_OFFSET.size)[0]
-        for i in range(n)
-    ]
-    return rows, cols, bool(stopped), offsets
+def _read_csv_header(path):
+    with path.open("rb") as f:
+        data = f.read(CSV_INDEX_HEADER.size)
+    if len(data) < CSV_INDEX_HEADER.size:
+        raise struct.error("short CSV index header")
+    rows, cols, stopped = CSV_INDEX_HEADER.unpack(data)
+    return rows, cols, bool(stopped)
+
+
+def _read_csv_offset(path, block):
+    with path.open("rb") as f:
+        f.seek(CSV_INDEX_HEADER.size + block * CSV_INDEX_OFFSET.size)
+        data = f.read(CSV_INDEX_OFFSET.size)
+    if len(data) < CSV_INDEX_OFFSET.size:
+        raise struct.error("short CSV index offset")
+    return CSV_INDEX_OFFSET.unpack(data)[0]
+
+
+def _drop_csv_index(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _scan_csv_file(fpath):
@@ -495,9 +509,12 @@ def _scan_csv_file(fpath):
 
 def csv_index(fpath):
     index_path = _csv_index_dir() / fpath.name
-    if index_path.is_file():
-        rows, cols, stopped, _ = _read_csv_index(index_path)
-        return rows, cols, stopped, index_path
+    try:
+        if index_path.is_file():
+            rows, cols, stopped = _read_csv_header(index_path)
+            return rows, cols, stopped, index_path
+    except (struct.error, OSError):
+        _drop_csv_index(index_path)
 
     _csv_index_dir().mkdir(parents=True, exist_ok=True)
 
@@ -508,9 +525,12 @@ def csv_index(fpath):
 
     try:
         fcntl.flock(raw.fileno(), fcntl.LOCK_EX)
-        if index_path.is_file():
-            rows, cols, stopped, _ = _read_csv_index(index_path)
-            return rows, cols, stopped, index_path
+        try:
+            if index_path.is_file():
+                rows, cols, stopped = _read_csv_header(index_path)
+                return rows, cols, stopped, index_path
+        except (struct.error, OSError):
+            _drop_csv_index(index_path)
 
         rows, cols, stopped, offsets = _scan_csv_file(fpath)
         # Name must be <sha256>.tmp-<pid>-<thread> so cleanup's split(".")[0] is the sha.
@@ -553,12 +573,18 @@ def _parse_csv_from(fpath, offset, count, strip_bom):
 
 
 def csv_rows(fpath, index_path, start_row, count):
-    rows, cols, stopped, offsets = _read_csv_index(index_path)
-    if start_row >= rows or count <= 0:
-        return []
-    block = start_row // CSV_BLOCK_ROWS
+    try:
+        rows, _, _ = _read_csv_header(index_path)
+        if start_row >= rows or count <= 0:
+            return []
+        offset = _read_csv_offset(index_path, start_row // CSV_BLOCK_ROWS)
+    except (struct.error, OSError):
+        _drop_csv_index(index_path)
+        rows, _, _, index_path = csv_index(fpath)
+        if start_row >= rows or count <= 0:
+            return []
+        offset = _read_csv_offset(index_path, start_row // CSV_BLOCK_ROWS)
     skip = start_row % CSV_BLOCK_ROWS
-    offset = offsets[block]
     parsed = _parse_csv_from(
         fpath, offset, skip + min(count, rows - start_row), strip_bom=(offset == 0)
     )

@@ -97,8 +97,9 @@
       const dialog = document.querySelector("dialog");
       const tiles = new Map();
       const inflight = new Map();
-      let viewRows = 1, viewCols = 0, viewH = RH, viewW = 0;
-      let spacerH = 0, spacerW = 0, poolRows = 1, poolCols = 0;
+      let viewRows = 1, viewCols = 0, poolRows = 1, poolCols = 0;
+      let spacerH = 0, spacerW = 0, vScaled = false, hScaled = false;
+      let cellGen = 0;
 
       function colLetter(n) {
         let s = "";
@@ -114,10 +115,12 @@
       function layout() {
         viewRows = Math.max(1, Math.min(CFG.rows, Math.floor((scrollbox.clientHeight - LH) / RH)));
         viewCols = CFG.cols === 0 ? 0 : Math.max(1, Math.min(CFG.cols, Math.floor((scrollbox.clientWidth - NW) / CW)));
-        viewH = viewRows * RH;
-        viewW = viewCols * CW;
-        spacerH = Math.min(CFG.rows * RH, CAP);
-        spacerW = Math.min(CFG.cols * CW, CAP);
+        const extraH = CFG.rows > viewRows ? (CFG.rows - viewRows) * RH : 0;
+        const extraW = CFG.cols > viewCols ? (CFG.cols - viewCols) * CW : 0;
+        spacerH = Math.min(scrollbox.clientHeight + extraH, CAP);
+        spacerW = Math.min(scrollbox.clientWidth + extraW, CAP);
+        vScaled = extraH > 0 && spacerH < scrollbox.clientHeight + extraH;
+        hScaled = extraW > 0 && spacerW < scrollbox.clientWidth + extraW;
         sizer.style.height = spacerH + "px";
         sizer.style.width = spacerW + "px";
         viewport.style.position = "sticky";
@@ -154,36 +157,34 @@
 
       function firstRow() {
         if (CFG.rows <= viewRows) return 0;
-        if (spacerH === CFG.rows * RH) {
-          return Math.min(CFG.rows - viewRows, Math.floor(scrollbox.scrollTop / RH));
-        }
-        const maxScroll = spacerH - viewH;
+        const maxScroll = spacerH - scrollbox.clientHeight;
         if (maxScroll <= 0) return 0;
+        if (!vScaled)
+          return Math.min(CFG.rows - viewRows, Math.floor(scrollbox.scrollTop / RH));
         return Math.min(CFG.rows - viewRows, Math.floor(scrollbox.scrollTop / maxScroll * (CFG.rows - viewRows)));
       }
 
       function firstCol() {
         if (CFG.cols === 0 || CFG.cols <= viewCols) return 0;
-        if (spacerW === CFG.cols * CW) {
-          return Math.min(CFG.cols - viewCols, Math.floor(scrollbox.scrollLeft / CW));
-        }
-        const maxScroll = spacerW - viewW;
+        const maxScroll = spacerW - scrollbox.clientWidth;
         if (maxScroll <= 0) return 0;
+        if (!hScaled)
+          return Math.min(CFG.cols - viewCols, Math.floor(scrollbox.scrollLeft / CW));
         return Math.min(CFG.cols - viewCols, Math.floor(scrollbox.scrollLeft / maxScroll * (CFG.cols - viewCols)));
       }
 
       function rowToScroll(fr) {
         if (CFG.rows <= viewRows) return 0;
-        if (spacerH === CFG.rows * RH) return fr * RH;
-        const maxScroll = spacerH - viewH;
+        if (!vScaled) return fr * RH;
+        const maxScroll = spacerH - scrollbox.clientHeight;
         if (maxScroll <= 0) return 0;
         return fr / (CFG.rows - viewRows) * maxScroll;
       }
 
       function colToScroll(fc) {
         if (CFG.cols === 0 || CFG.cols <= viewCols) return 0;
-        if (spacerW === CFG.cols * CW) return fc * CW;
-        const maxScroll = spacerW - viewW;
+        if (!hScaled) return fc * CW;
+        const maxScroll = spacerW - scrollbox.clientWidth;
         if (maxScroll <= 0) return 0;
         return fc / (CFG.cols - viewCols) * maxScroll;
       }
@@ -271,14 +272,15 @@
       }
 
       function openCell(r, c) {
+        const gen = ++cellGen;
         dialog.querySelector("h2").textContent = colLetter(c) + (r + 1);
         const pre = dialog.querySelector("pre");
         pre.textContent = "Loading…";
         dialog.showModal();
         fetch(CFG.dataUrl + "?r=" + r + "&c=" + c)
           .then((res) => res.json())
-          .then((data) => { pre.textContent = data.text || ""; })
-          .catch(() => { pre.textContent = ""; });
+          .then((data) => { if (gen === cellGen) pre.textContent = data.text || ""; })
+          .catch(() => { if (gen === cellGen) pre.textContent = ""; });
       }
 
       dialog.addEventListener("click", (e) => {
@@ -289,8 +291,6 @@
       window.addEventListener("resize", layout);
 
       scrollbox.addEventListener("wheel", (e) => {
-        const vScaled = spacerH < CFG.rows * RH;
-        const hScaled = spacerW < CFG.cols * CW;
         const vHit = vScaled && e.deltaY;
         const hHit = hScaled && e.deltaX;
         if (!vHit && !hHit) return;

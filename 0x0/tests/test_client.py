@@ -648,6 +648,18 @@ def test_csv_preview_bom_only_is_empty(client):
     assert get_csv_cfg(html)["rows"] == 0
 
 
+def test_csv_preview_crlf_only_is_one_empty_row(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\r\n"), "crlf.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." not in html
+    assert get_csv_cfg(html)["rows"] == 1
+
+
 def test_csv_preview_bom_plus_newline_is_one_row(client):
     rv = client.post(
         "/",
@@ -753,6 +765,47 @@ def test_csv_index_is_reused_on_second_get(client, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_csv_truncated_index_rescans_instead_of_500(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "truncidx.csv")},
+    )
+    path = get_uploaded_path(rv)
+    preview = client.get(path)
+    assert preview.status_code == 200
+    assert get_csv_cfg(preview.get_data(as_text=True))["rows"] == 2
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    index = next(p for p in (storage / ".csv-index").iterdir() if p.is_file())
+    index.write_bytes(index.read_bytes()[:10])
+    preview = client.get(path)
+    assert preview.status_code == 200
+    assert get_csv_cfg(preview.get_data(as_text=True))["rows"] == 2
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"})
+    assert tile.status_code == 200
+    assert tile.get_json()["rows"][0] == ["a", "b"]
+
+
+def test_csv_tile_does_not_load_whole_index(client, monkeypatch):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "seek.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+
+    def boom(self):
+        raise AssertionError("whole index loaded")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    assert client.get(path).status_code == 200
+    assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 200
+    assert client.get("/csv/" + path, query_string={"r": "0", "c": "0"}).status_code == 200
+
+
 def test_csv_tile_parses_quoted_fields_and_escapes(client):
     rv = client.post(
         "/",
@@ -766,6 +819,7 @@ def test_csv_tile_parses_quoted_fields_and_escapes(client):
             b'\n'
             b'1\n'
             b'<b>,x\n'
+            b'bad,\xff\n'
         ), "edges.csv")},
     )
     path = get_uploaded_path(rv)
@@ -781,6 +835,7 @@ def test_csv_tile_parses_quoted_fields_and_escapes(client):
     assert rows[4] == []
     assert rows[5] == ["1"]
     assert rows[6] == ["<b>", "x"]
+    assert rows[7] == ["bad", "\ufffd"]
 
 
 def test_csv_tile_straddling_quoted_newline_at_block_boundary(client):
