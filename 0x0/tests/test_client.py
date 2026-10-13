@@ -582,7 +582,7 @@ def test_csv_upload_renders_table_preview_with_download_link(client):
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
     assert '<a href="https://localhost/download/' in html
     assert ">Download</a>" in html
-    assert "<pre>" not in html
+    assert "<pre>a,b" not in html
 
     download = client.get(get_download_path(html))
     assert download.status_code == 200
@@ -602,7 +602,7 @@ def test_compound_csv_extension_gets_table_preview(client):
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
     assert ">Download</a>" in html
-    assert "<pre>" not in html
+    assert "<pre>a,b" not in html
 
 
 def test_txt_with_commas_stays_plain_text_preview(client):
@@ -698,6 +698,37 @@ def test_csv_preview_overlong_line_stops_at_row_zero(client):
     html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
     assert "Couldn't read past row 0." in html
     assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_grid_chrome_when_rows_exist(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "grid.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    cfg = get_csv_cfg(html)
+    assert cfg["rows"] == 2
+    assert cfg["cols"] == 2
+    assert cfg["dataUrl"].startswith("/csv/")
+    assert 'class="scrollbox"' in html
+    assert 'class="sizer"' in html
+    assert "<dialog" in html
+    assert 'type="number"' in html
+    assert "Couldn't read past row" not in html
+
+
+def test_csv_preview_no_grid_when_empty(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b""), "nogrid.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert 'class="scrollbox"' not in html
+    assert "<dialog" not in html
 
 
 def test_csv_index_is_reused_on_second_get(client, monkeypatch):
