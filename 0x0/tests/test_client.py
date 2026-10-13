@@ -8,6 +8,7 @@ import re
 from urllib.parse import urlparse
 from flask_migrate import upgrade as db_upgrade
 from io import BytesIO
+from pathlib import Path
 
 app = None
 db = None
@@ -50,6 +51,7 @@ def client():
         File = fhost.File
         URL = fhost.URL
         app.config["FHOST_STORAGE_PATH"] = os.path.join(tmpdir, "up")
+        os.makedirs(app.config["FHOST_STORAGE_PATH"], exist_ok=True)
         app.config["TESTING"] = True
 
         with app.test_client() as client:
@@ -823,5 +825,54 @@ def test_csv_data_rejects_non_csv_and_removed(client):
     f.removed = True
     db.session.commit()
     assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 451
+
+
+def test_cleanup_skips_csv_index_dir_and_missing_dir(client):
+    import cleanup as cleanup_mod
+    storage = app.config["FHOST_STORAGE_PATH"]
+    Path(storage, ".csv-index").mkdir()
+    cleanup_mod.cleanup_expired(storage, app.config["MAX_CONTENT_LENGTH"])
+    assert Path(storage, ".csv-index").is_dir()
+    import shutil
+    shutil.rmtree(Path(storage, ".csv-index"))
+    cleanup_mod.cleanup_expired(storage, app.config["MAX_CONTENT_LENGTH"])
+
+
+def test_cleanup_deletes_orphan_csv_index(client):
+    import cleanup as cleanup_mod
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    index_dir = storage / ".csv-index"
+    index_dir.mkdir()
+    orphan = index_dir / "deadbeef"
+    tmp = index_dir / "deadbeef.tmp-1-2"
+    orphan.write_bytes(b"x")
+    tmp.write_bytes(b"y")
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert not orphan.exists()
+    assert not tmp.exists()
+
+
+def test_cleanup_keeps_index_for_live_csv_and_drops_it_after_expiry(client):
+    import cleanup as cleanup_mod
+    import time
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n"), "keep.csv")},
+    )
+    client.get(get_uploaded_path(rv))
+    fhost = sys.modules["fhost"]
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    sha = next(p.name for p in storage.iterdir() if p.is_file())
+    index = storage / ".csv-index" / sha
+    assert index.is_file()
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert index.is_file()
+    old = time.time() - 400 * 86400
+    os.utime(storage / sha, (old, old))
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert not (storage / sha).exists()
+    assert not index.exists()
 
 

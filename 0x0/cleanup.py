@@ -24,21 +24,32 @@ import time
 import datetime
 from fhost import app
 
-os.chdir(os.path.dirname(sys.argv[0]))
-os.chdir(app.config["FHOST_STORAGE_PATH"])
-
-files = [f for f in os.listdir(".")]
-
-maxs = app.config["MAX_CONTENT_LENGTH"]
-mind = 30
-maxd = 365
-
-for f in files:
-    stat = os.stat(f)
+def cleanup_expired(storage_path, maxs, mind=30, maxd=365):
+    names = os.listdir(storage_path)
     systime = time.time()
-    age = datetime.timedelta(seconds=(systime - stat.st_mtime)).days
+    remaining = set()
 
-    maxage = mind + (-maxd + mind) * (stat.st_size / maxs - 1) ** 3
+    for name in names:
+        path = os.path.join(storage_path, name)
+        if not os.path.isfile(path):
+            continue
+        stat = os.stat(path)
+        age = datetime.timedelta(seconds=(systime - stat.st_mtime)).days
+        maxage = mind + (-maxd + mind) * (stat.st_size / maxs - 1) ** 3
+        if age >= maxage:
+            os.remove(path)
+        else:
+            remaining.add(name)
 
-    if age >= maxage:
-        os.remove(f)
+    index_dir = os.path.join(storage_path, ".csv-index")
+    if not os.path.isdir(index_dir):
+        return
+    for name in os.listdir(index_dir):
+        sha = name.split(".")[0]
+        if sha not in remaining:
+            os.remove(os.path.join(index_dir, name))
+
+
+if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.abspath(sys.argv[0])))
+    cleanup_expired(app.config["FHOST_STORAGE_PATH"], app.config["MAX_CONTENT_LENGTH"])
