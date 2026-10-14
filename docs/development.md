@@ -89,8 +89,6 @@ cd 0x0
 │   ├── architecture.md           # Architecture design & Mermaid diagrams
 │   ├── runbook.md                # Deployment & Operations runbook
 │   └── development.md            # Developer guide & test environment
-├── source-of-truth/              # Master technical specifications
-│   └── 0x0-dockerized-master-tech-spec.md
 ├── docker-compose.yml            # Docker Compose service definition
 ├── .env.example                  # Environment template
 └── README.md                     # Repository overview & quick start

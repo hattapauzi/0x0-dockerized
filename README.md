@@ -136,7 +136,6 @@ For full setup instructions, see **[Development Guide](docs/development.md)** an
 - **[Architecture & Design](docs/architecture.md):** Architecture diagrams, token generation, deduplication, and security models.
 - **[Operations Runbook](docs/runbook.md):** Production deployment, Nginx/Caddy proxy setup, backups, and troubleshooting.
 - **[Development & Testing](docs/development.md):** Local virtualenv setup, pytest suite, and database migrations.
-- **[Master Technical Specification](source-of-truth/0x0-dockerized-master-tech-spec.md):** Source of truth technical specification.
 
 ---
 
