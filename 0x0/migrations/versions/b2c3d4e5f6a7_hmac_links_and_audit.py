@@ -10,6 +10,7 @@ from alembic import op
 from alembic import context
 import sqlalchemy as sa
 import hmac
+import os
 from flask import current_app
 
 
@@ -26,12 +27,18 @@ def compute_link(secret, sha256_val, ext_val, original_name_val):
 
 
 def upgrade():
-    secret = current_app.config.get("FHOST_LINK_SECRET") or "test-secret"
+    secret = current_app.config.get("FHOST_LINK_SECRET") or os.environ.get("FHOST_LINK_SECRET")
+    if not secret:
+        if current_app.config.get("TESTING"):
+            secret = "test-secret"
+        else:
+            raise RuntimeError("FHOST_LINK_SECRET is required to backfill links during migration")
 
     # 1. Add link column (nullable initially for backfill)
     op.add_column('file', sa.Column('link', sa.String(length=64), nullable=True))
 
-    # 2. Backfill link column
+    # 2. Backfill link column: iterates existing rows in Python and derives HMAC-SHA256,
+    # treating NULL ext and original_name values as empty strings ("").
     bind = op.get_bind()
     file_table = sa.table(
         'file',

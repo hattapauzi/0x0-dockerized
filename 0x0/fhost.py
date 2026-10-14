@@ -19,9 +19,10 @@
     and limitations under the License.
 """
 
-from flask import Flask, abort, make_response, redirect, request, send_from_directory, url_for, Response, render_template
+from flask import Flask, abort, has_request_context, make_response, redirect, request, send_from_directory, url_for, Response, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from sqlalchemy.exc import IntegrityError
 from jinja2.exceptions import *
 from jinja2 import ChoiceLoader, FileSystemLoader
 from markupsafe import Markup
@@ -36,7 +37,6 @@ import json
 import markdown
 import os
 import re
-import secrets
 import struct
 import sys
 import threading
@@ -77,7 +77,6 @@ app.config.update(
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
     NSFW_THRESHOLD = 0.608,
-    FHOST_TOKEN_LENGTH = 12,
     URL_ALPHABET = "DEQhd2uFteibPwq0SWBInTpA_jcZL5GKz3YCR14Ulk87Jors9vNHgfaOmMXy6Vx-",
     FHOST_LINK_SECRET = None,
 )
@@ -150,7 +149,7 @@ class FileAudit(db.Model):
 class File(db.Model):
     id = db.Column(db.Integer, primary_key = True)
     sha256 = db.Column(db.String, index = True)
-    token = db.Column(db.String(32), unique = False, nullable = True)
+    token = db.Column(db.String(32), unique = True, nullable = True)
     link = db.Column(db.String(64), nullable = False)
     ext = db.Column(db.UnicodeText)
     mime = db.Column(db.UnicodeText)
@@ -176,11 +175,12 @@ class File(db.Model):
 
     def geturl(self):
         n = self.getname()
+        scheme = app.config.get("PREFERRED_URL_SCHEME") or (request.scheme if has_request_context() else "https")
 
         if self.nsfw_score and self.nsfw_score > app.config["NSFW_THRESHOLD"]:
-            return url_for("get", path=n, _external=True, _scheme="https", _anchor="nsfw") + "\n"
+            return url_for("get", path=n, _external=True, _scheme=scheme, _anchor="nsfw") + "\n"
         else:
-            return url_for("get", path=n, _external=True, _scheme="https") + "\n"
+            return url_for("get", path=n, _external=True, _scheme=scheme) + "\n"
 
     def store(file_, addr):
         data = file_.stream.read()
@@ -247,10 +247,11 @@ class File(db.Model):
         storage.mkdir(parents=True, exist_ok=True)
         p = storage / digest
 
-        existing = File.query.filter_by(link=link).first()
+        if File.query.filter_by(link=link, removed=True).first():
+            abort(451)
+
+        existing = File.query.filter_by(link=link, removed=False).first()
         if existing:
-            if existing.removed:
-                abort(451)
             if not p.is_file():
                 file_.stream.seek(0)
                 file_.save(p)
@@ -273,12 +274,12 @@ class File(db.Model):
             db.session.add(f)
             db.session.commit()
             return f
-        except Exception:
+        except IntegrityError:
             db.session.rollback()
-            existing = File.query.filter_by(link=link).first()
+            if File.query.filter_by(link=link, removed=True).first():
+                abort(451)
+            existing = File.query.filter_by(link=link, removed=False).first()
             if existing:
-                if existing.removed:
-                    abort(451)
                 return existing
             raise
 
@@ -698,7 +699,8 @@ def lookup_file(path):
 def _make_legacy_redirect(endpoint, f, extra=None):
     qs = f"?{request.query_string.decode('utf-8')}" if request.query_string else ""
     target_path = f.getname() if not extra else f"{f.getname()}/{extra}"
-    target = url_for(endpoint, path=target_path, _external=True, _scheme="https") + qs
+    scheme = app.config.get("PREFERRED_URL_SCHEME") or request.scheme or "https"
+    target = url_for(endpoint, path=target_path, _external=True, _scheme=scheme) + qs
     return redirect(target, code=301)
 
 

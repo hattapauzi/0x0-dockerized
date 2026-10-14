@@ -1382,3 +1382,90 @@ def test_prune_rows_deletes_expired_active_records_and_logs_audit(client):
         assert not hasattr(FileAudit, "addr")
 
 
+def test_store_mixed_legacy_duplicates_451_not_bypassed(client):
+    content = b"mixed-legacy-duplicate-content"
+    # Seed active row (id=1) and removed row (id=2) with the exact same link and name
+    rv1 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(content), "mixed.txt")})
+    assert rv1.status_code == 200
+    link = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+
+    with app.app_context():
+        # First row is active
+        f1 = File.query.filter_by(link=link).first()
+        assert f1.removed is False
+
+        # Add second legacy row with different token, same link, but removed=True
+        f2 = File(
+            sha256=f1.sha256,
+            token="leg_tok_mixed",
+            ext=".txt",
+            mime="text/plain",
+            addr="10.0.0.99",
+            original_name="mixed.txt",
+            link=link
+        )
+        f2.removed = True
+        db.session.add(f2)
+        db.session.commit()
+
+    # Attempt re-upload of the file. It must abort with 451, not return 200!
+    rv_reupload = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(content), "mixed.txt")})
+    assert rv_reupload.status_code == 451
+
+
+def test_token_model_unique_flag():
+    # Verify model token column has unique=True to match migrated database uq_file_token
+    assert File.token.property.columns[0].unique is True
+
+
+def test_legacy_redirect_respects_preferred_url_scheme(client):
+    orig = app.config.get("PREFERRED_URL_SCHEME")
+    try:
+        app.config["PREFERRED_URL_SCHEME"] = "http"
+        # Seed file
+        rv = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"scheme-test"), "scheme.txt")})
+        canonical_link = rv.data.decode().removeprefix("http://localhost/").split(".")[0]
+
+        with app.app_context():
+            f = File.query.filter_by(link=canonical_link).first()
+            f.token = "tok_scheme01"
+            db.session.commit()
+
+        res = client.get("/tok_scheme01.txt?foo=bar")
+        assert res.status_code == 301
+        assert res.headers["Location"].startswith("http://localhost/")
+        assert res.headers["Location"].endswith(f"/{canonical_link}.txt?foo=bar")
+    finally:
+        app.config["PREFERRED_URL_SCHEME"] = orig
+
+
+def test_migration_fail_closed_without_secret():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "migration_b2c",
+        Path(__file__).parent.parent / "migrations/versions/b2c3d4e5f6a7_hmac_links_and_audit.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # In non-testing context with no secret, upgrade() must raise RuntimeError
+    orig_secret = app.config.get("FHOST_LINK_SECRET")
+    orig_env = os.environ.get("FHOST_LINK_SECRET")
+    orig_testing = app.config.get("TESTING")
+    try:
+        app.config["FHOST_LINK_SECRET"] = None
+        app.config["TESTING"] = False
+        if "FHOST_LINK_SECRET" in os.environ:
+            del os.environ["FHOST_LINK_SECRET"]
+
+        with app.app_context():
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required to backfill links"):
+                mod.upgrade()
+    finally:
+        app.config["FHOST_LINK_SECRET"] = orig_secret
+        if orig_env is not None:
+            os.environ["FHOST_LINK_SECRET"] = orig_env
+        app.config["TESTING"] = orig_testing
+
+
+

@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import datetime
+from pathlib import Path
 from fhost import app
 
 def cleanup_expired(storage_path, maxs, mind=30, maxd=365):
@@ -50,46 +51,39 @@ def cleanup_expired(storage_path, maxs, mind=30, maxd=365):
             os.remove(os.path.join(index_dir, name))
 
 
-from pathlib import Path
 
 # ponytail: legacy token links. Remove when
 #   SELECT count(*) FROM file WHERE token IS NOT NULL;  -> 0
 # then: migration dropping file.token and recreating uq_file_link without WHERE.
 
 def prune_rows(storage_path):
-    import sys
-    if "fhost" in sys.modules:
-        fhost = sys.modules["fhost"]
-    else:
-        import fhost
-    app = fhost.app
-    db = fhost.db
-    File = fhost.File
-    FileAudit = fhost.FileAudit
-
+    import fhost
     storage = Path(storage_path)
-    with app.app_context():
-        distinct_shas = [r[0] for r in db.session.query(File.sha256).distinct().all() if r[0]]
+    with fhost.app.app_context():
+        distinct_shas = [r[0] for r in fhost.db.session.query(fhost.File.sha256).distinct().all() if r[0]]
 
         for sha in distinct_shas:
-            # Fresh stat check: avoid race conditions with recent uploads
-            if (storage / sha).is_file():
+            target_file = storage / sha
+            # TOCTOU-reduced stat check: skip if file exists on disk
+            if target_file.is_file():
                 continue
 
             # 1. Unmoderated expired files: record non-PII audit and delete row (data minimization)
-            expired_rows = File.query.filter_by(sha256=sha, removed=False).all()
+            expired_rows = fhost.File.query.filter_by(sha256=sha, removed=False).all()
             for row in expired_rows:
-                db.session.add(FileAudit(sha256=row.sha256, link=row.link, action="PRUNED_EXPIRED"))
+                fhost.db.session.add(fhost.FileAudit(sha256=row.sha256, link=row.link, action="PRUNED_EXPIRED"))
             if expired_rows:
-                File.query.filter_by(sha256=sha, removed=False).delete()
+                # Re-verify absence immediately before delete to reduce TOCTOU race window
+                if not target_file.is_file():
+                    fhost.File.query.filter_by(sha256=sha, removed=False).delete(synchronize_session=False)
 
             # 2. Moderated files: scrub IP to protect privacy, keep minimal blocklist row
-            moderated_rows = File.query.filter(File.sha256 == sha, File.removed == True, File.addr != None).all()
+            moderated_rows = fhost.File.query.filter(fhost.File.sha256 == sha, fhost.File.removed == True, fhost.File.addr != None).all()
             for row in moderated_rows:
-                db.session.add(FileAudit(sha256=row.sha256, link=row.link, action="MODERATED_ADDR_SCRUBBED"))
+                fhost.db.session.add(fhost.FileAudit(sha256=row.sha256, link=row.link, action="MODERATED_ADDR_SCRUBBED"))
                 row.addr = None
 
-        db.session.commit()
+        fhost.db.session.commit()
 
 
 if __name__ == "__main__":
