@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSV preview</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      box-sizing: border-box;
+      color: #1f2937;
+      display: flex;
+      flex-direction: column;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      height: 100dvh;
+    }
+    .toolbar {
+      flex: 0 0 auto;
+      padding: 0.75rem 1rem;
+    }
+    .toolbar p { margin: 0 0 0.5rem; }
+    .scrollbox {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      position: relative;
+    }
+    table {
+      background: #fff;
+      border-collapse: separate;
+      border-spacing: 0;
+      box-sizing: border-box;
+      table-layout: fixed;
+    }
+    th, td {
+      border: 1px solid #d1d5db;
+      box-sizing: border-box;
+      height: 28px;
+      overflow: hidden;
+      padding: 0 0.4rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    th {
+      background: #f3f4f6;
+      font-weight: 600;
+    }
+    .num { width: 80px; }
+    .cell { width: 120px; cursor: pointer; }
+    dialog {
+      max-height: 80dvh;
+      overflow: auto;
+      white-space: pre-wrap;
+      width: min(90vw, 60ch);
+    }
+    dialog pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <p>
+      <a href="{{ download_url }}">Download</a>
+      {% if rows > 0 %}
+      <label>Row <input id="goto" type="number" min="1" max="{{ rows }}"></label>
+      {% endif %}
+    </p>
+    {% if stopped %}
+    <p>Couldn't read past row {{ rows }}.</p>
+    {% elif rows == 0 %}
+    <p>Empty file.</p>
+    {% endif %}
+  </div>
+  {% if rows > 0 %}
+  <div class="scrollbox">
+    <div class="sizer">
+      <div class="viewport">
+        <table></table>
+      </div>
+    </div>
+  </div>
+  <dialog>
+    <form method="dialog"><button>Close</button></form>
+    <h2></h2>
+    <pre></pre>
+  </dialog>
+  {% endif %}
+  <script>
+    const CFG = {{ {"rows": rows, "cols": cols, "dataUrl": data_url} | tojson }};
+    const RH = 28, CW = 120, NW = 80, LH = 28, CAP = 10000000;
+    if (CFG.rows > 0) {
+      const scrollbox = document.querySelector(".scrollbox");
+      const sizer = document.querySelector(".sizer");
+      const viewport = document.querySelector(".viewport");
+      const table = document.querySelector("table");
+      const dialog = document.querySelector("dialog");
+      const tiles = new Map();
+      const inflight = new Map();
+      let viewRows = 1, viewCols = 0, poolRows = 1, poolCols = 0;
+      let spacerH = 0, spacerW = 0, vScaled = false, hScaled = false;
+      let cellGen = 0;
+
+      function colLetter(n) {
+        let s = "";
+        n += 1;
+        while (n > 0) {
+          n--;
+          s = String.fromCharCode(65 + n % 26) + s;
+          n = Math.floor(n / 26);
+        }
+        return s;
+      }
+
+      function layout() {
+        viewRows = Math.max(1, Math.min(CFG.rows, Math.floor((scrollbox.clientHeight - LH) / RH)));
+        viewCols = CFG.cols === 0 ? 0 : Math.max(1, Math.min(CFG.cols, Math.floor((scrollbox.clientWidth - NW) / CW)));
+        const extraH = CFG.rows > viewRows ? (CFG.rows - viewRows) * RH : 0;
+        const extraW = CFG.cols > viewCols ? (CFG.cols - viewCols) * CW : 0;
+        spacerH = Math.min(scrollbox.clientHeight + extraH, CAP);
+        spacerW = Math.min(scrollbox.clientWidth + extraW, CAP);
+        vScaled = extraH > 0 && spacerH < scrollbox.clientHeight + extraH;
+        hScaled = extraW > 0 && spacerW < scrollbox.clientWidth + extraW;
+        sizer.style.height = spacerH + "px";
+        sizer.style.width = spacerW + "px";
+        viewport.style.position = "sticky";
+        viewport.style.top = "0";
+        viewport.style.left = "0";
+        viewport.style.height = "0";
+        viewport.style.width = "0";
+        viewport.style.overflow = "visible";
+        poolRows = Math.min(CFG.rows, viewRows + 1);
+        poolCols = CFG.cols === 0 ? 0 : Math.min(CFG.cols, viewCols + 1);
+        table.replaceChildren();
+        const head = table.createTHead();
+        const hr = head.insertRow();
+        hr.appendChild(document.createElement("th")).className = "num";
+        for (let j = 0; j < poolCols; j++) {
+          const th = document.createElement("th");
+          th.className = "cell";
+          hr.appendChild(th);
+        }
+        const body = table.createTBody();
+        for (let i = 0; i < poolRows; i++) {
+          const tr = body.insertRow();
+          const th = document.createElement("th");
+          th.className = "num";
+          tr.appendChild(th);
+          for (let j = 0; j < poolCols; j++) {
+            const td = document.createElement("td");
+            td.className = "cell";
+            tr.appendChild(td);
+          }
+        }
+        draw();
+      }
+
+      function firstRow() {
+        if (CFG.rows <= viewRows) return 0;
+        const maxScroll = spacerH - scrollbox.clientHeight;
+        if (maxScroll <= 0) return 0;
+        if (!vScaled)
+          return Math.min(CFG.rows - viewRows, Math.floor(scrollbox.scrollTop / RH));
+        return Math.min(CFG.rows - viewRows, Math.floor(scrollbox.scrollTop / maxScroll * (CFG.rows - viewRows)));
+      }
+
+      function firstCol() {
+        if (CFG.cols === 0 || CFG.cols <= viewCols) return 0;
+        const maxScroll = spacerW - scrollbox.clientWidth;
+        if (maxScroll <= 0) return 0;
+        if (!hScaled)
+          return Math.min(CFG.cols - viewCols, Math.floor(scrollbox.scrollLeft / CW));
+        return Math.min(CFG.cols - viewCols, Math.floor(scrollbox.scrollLeft / maxScroll * (CFG.cols - viewCols)));
+      }
+
+      function rowToScroll(fr) {
+        if (CFG.rows <= viewRows) return 0;
+        if (!vScaled) return fr * RH;
+        const maxScroll = spacerH - scrollbox.clientHeight;
+        if (maxScroll <= 0) return 0;
+        return fr / (CFG.rows - viewRows) * maxScroll;
+      }
+
+      function colToScroll(fc) {
+        if (CFG.cols === 0 || CFG.cols <= viewCols) return 0;
+        if (!hScaled) return fc * CW;
+        const maxScroll = spacerW - scrollbox.clientWidth;
+        if (maxScroll <= 0) return 0;
+        return fc / (CFG.cols - viewCols) * maxScroll;
+      }
+
+      // ponytail: each tile re-parses 200 full rows even when it only needs 50 columns. Cache parsed row blocks if wide sheets feel slow when scrolling sideways.
+      function cellText(r, c) {
+        if (c >= CFG.cols) return "";
+        const rb = Math.floor(r / 200), cb = Math.floor(c / 50);
+        const tile = tiles.get(rb + ":" + cb);
+        if (!tile) return "";
+        const row = tile[r - rb * 200];
+        if (!row) return "";
+        const text = row[c - cb * 50];
+        return text == null ? "" : text;
+      }
+
+      function wantTile(rb, cb) {
+        const key = rb + ":" + cb;
+        if (tiles.has(key) || inflight.has(key)) {
+          if (tiles.has(key)) {
+            const val = tiles.get(key);
+            tiles.delete(key);
+            tiles.set(key, val);
+          }
+          return;
+        }
+        const p = fetch(CFG.dataUrl + "?rb=" + rb + "&cb=" + cb)
+          .then((res) => res.json())
+          .then((data) => {
+            tiles.set(key, data.rows || []);
+            inflight.delete(key);
+            while (tiles.size > 64) tiles.delete(tiles.keys().next().value);
+            draw();
+          })
+          .catch(() => inflight.delete(key));
+        inflight.set(key, p);
+      }
+
+      function draw() {
+        const fr = firstRow();
+        const fc = firstCol();
+        const head = table.tHead.rows[0];
+        for (let j = 0; j < poolCols; j++) {
+          const c = fc + j;
+          const th = head.cells[j + 1];
+          if (c >= CFG.cols) {
+            th.textContent = "";
+            th.style.visibility = "hidden";
+          } else {
+            th.style.visibility = "visible";
+            th.textContent = colLetter(c);
+          }
+        }
+        const body = table.tBodies[0];
+        for (let i = 0; i < poolRows; i++) {
+          const r = fr + i;
+          const tr = body.rows[i];
+          if (r >= CFG.rows) {
+            tr.style.visibility = "hidden";
+            continue;
+          }
+          tr.style.visibility = "visible";
+          tr.cells[0].textContent = String(r + 1);
+          for (let j = 0; j < poolCols; j++) {
+            const c = fc + j;
+            const td = tr.cells[j + 1];
+            if (c >= CFG.cols) {
+              td.textContent = "";
+              td.style.visibility = "hidden";
+              td.onclick = null;
+            } else {
+              td.style.visibility = "visible";
+              td.textContent = cellText(r, c);
+              td.onclick = () => openCell(r, c);
+            }
+          }
+        }
+        const rb0 = Math.floor(fr / 200);
+        const rb1 = Math.floor((fr + poolRows - 1) / 200);
+        const cb0 = poolCols === 0 ? 0 : Math.floor(fc / 50);
+        const cb1 = poolCols === 0 ? -1 : Math.floor((fc + poolCols - 1) / 50);
+        for (let rb = rb0; rb <= rb1; rb++) {
+          for (let cb = cb0; cb <= cb1; cb++) wantTile(rb, cb);
+        }
+      }
+
+      function openCell(r, c) {
+        const gen = ++cellGen;
+        dialog.querySelector("h2").textContent = colLetter(c) + (r + 1);
+        const pre = dialog.querySelector("pre");
+        pre.textContent = "Loading…";
+        dialog.showModal();
+        fetch(CFG.dataUrl + "?r=" + r + "&c=" + c)
+          .then((res) => res.json())
+          .then((data) => { if (gen === cellGen) pre.textContent = data.text || ""; })
+          .catch(() => { if (gen === cellGen) pre.textContent = ""; });
+      }
+
+      dialog.addEventListener("click", (e) => {
+        if (e.target === dialog) dialog.close();
+      });
+
+      scrollbox.addEventListener("scroll", draw);
+      window.addEventListener("resize", layout);
+
+      scrollbox.addEventListener("wheel", (e) => {
+        const vHit = vScaled && e.deltaY;
+        const hHit = hScaled && e.deltaX;
+        if (!vHit && !hHit) return;
+        e.preventDefault();
+        if (vHit) {
+          const fr = Math.max(0, Math.min(CFG.rows - viewRows, firstRow() + Math.sign(e.deltaY)));
+          scrollbox.scrollTop = rowToScroll(fr);
+        } else if (e.deltaY) {
+          scrollbox.scrollTop += e.deltaY;
+        }
+        if (hHit) {
+          const fc = Math.max(0, Math.min(Math.max(CFG.cols - viewCols, 0), firstCol() + Math.sign(e.deltaX)));
+          scrollbox.scrollLeft = colToScroll(fc);
+        } else if (e.deltaX) {
+          scrollbox.scrollLeft += e.deltaX;
+        }
+      }, { passive: false });
+
+      const goto = document.getElementById("goto");
+      goto.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const value = Math.min(CFG.rows, Math.max(1, Number(goto.value) || 1));
+        goto.value = String(value);
+        const fr = Math.min(value - 1, CFG.rows - viewRows);
+        scrollbox.scrollTop = rowToScroll(fr);
+        draw();
+      });
+
+      layout();
+    }
+  </script>
+</body>
+</html>

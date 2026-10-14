@@ -3,10 +3,12 @@ import tempfile
 import os
 import sys
 import importlib
+import json
 import re
 from urllib.parse import urlparse
 from flask_migrate import upgrade as db_upgrade
 from io import BytesIO
+from pathlib import Path
 
 app = None
 db = None
@@ -24,6 +26,12 @@ def get_download_path(html):
     match = re.search(r'href="([^"]+)"', html)
     assert match is not None
     return urlparse(match.group(1)).path
+
+
+def get_csv_cfg(html):
+    match = re.search(r"const CFG = (\{.*?\});", html, re.DOTALL)
+    assert match is not None
+    return json.loads(match.group(1))
 
 @pytest.fixture
 def client():
@@ -43,6 +51,7 @@ def client():
         File = fhost.File
         URL = fhost.URL
         app.config["FHOST_STORAGE_PATH"] = os.path.join(tmpdir, "up")
+        os.makedirs(app.config["FHOST_STORAGE_PATH"], exist_ok=True)
         app.config["TESTING"] = True
 
         with app.test_client() as client:
@@ -555,5 +564,401 @@ def test_webm_upload_renders_player_preview(client):
     assert preview.mimetype == "text/html"
     assert "<video controls" in preview_html
     assert 'type="video/webm"' in preview_html
+
+
+def test_csv_upload_renders_table_preview_with_download_link(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "sheet.csv")},
+    )
+    preview_path = get_uploaded_path(rv)
+    preview = client.get(preview_path)
+    html = preview.get_data(as_text=True)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="https://localhost/download/' in html
+    assert ">Download</a>" in html
+    assert "<pre>a,b" not in html
+
+    download = client.get(get_download_path(html))
+    assert download.status_code == 200
+    assert download.headers["Content-Disposition"] == 'attachment; filename="sheet.csv"'
+    assert download.get_data() == b"a,b\n1,2\n"
+
+
+def test_compound_csv_extension_gets_table_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n"), "report.2024.csv")},
+    )
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert ">Download</a>" in html
+    assert "<pre>a,b" not in html
+
+
+def test_txt_with_commas_stays_plain_text_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "notes.txt")},
+    )
+    preview = client.get(get_uploaded_path(rv))
+    html = preview.get_data(as_text=True)
+    assert "<pre>" in html
+    assert "a,b" in html
+    assert "const CFG" not in html
+
+
+def test_csv_preview_empty_file_message(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b""), "empty.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." in html
+    assert "Couldn't read past row" not in html
+    assert 'class="scrollbox"' not in html
+    assert 'type="number"' not in html
+    cfg = get_csv_cfg(html)
+    assert cfg["rows"] == 0
+    assert cfg["cols"] == 0
+
+
+def test_csv_preview_bom_only_is_empty(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\xef\xbb\xbf"), "bom.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_crlf_only_is_one_empty_row(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\r\n"), "crlf.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." not in html
+    assert get_csv_cfg(html)["rows"] == 1
+
+
+def test_csv_preview_bom_plus_newline_is_one_row(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\xef\xbb\xbf\n"), "bomnl.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Empty file." not in html
+    assert get_csv_cfg(html)["rows"] == 1
+
+
+def test_csv_preview_cr_only_stops_at_row_zero(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"\r"), "mac.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 0." in html
+    assert "Empty file." not in html
+    assert 'class="scrollbox"' not in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_huge_field_keeps_prior_rows(client):
+    payload = b"a\nb\n" + b"x" * 131073 + b"\n"
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "widefield.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 2." in html
+    assert get_csv_cfg(html)["rows"] == 2
+
+
+def test_csv_preview_overlong_line_stops_at_row_zero(client):
+    payload = b"x" * (4 * 1024 * 1024 + 1)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "longline.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert "Couldn't read past row 0." in html
+    assert get_csv_cfg(html)["rows"] == 0
+
+
+def test_csv_preview_grid_chrome_when_rows_exist(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "grid.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    cfg = get_csv_cfg(html)
+    assert cfg["rows"] == 2
+    assert cfg["cols"] == 2
+    assert cfg["dataUrl"].startswith("/csv/")
+    assert 'class="scrollbox"' in html
+    assert 'class="sizer"' in html
+    assert "<dialog" in html
+    assert 'type="number"' in html
+    assert "Couldn't read past row" not in html
+
+
+def test_csv_preview_no_grid_when_empty(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b""), "nogrid.csv")},
+    )
+    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
+    assert 'class="scrollbox"' not in html
+    assert "<dialog" not in html
+
+
+def test_csv_index_is_reused_on_second_get(client, monkeypatch):
+    fhost = sys.modules["fhost"]
+    calls = {"n": 0}
+    real = fhost._scan_csv_file
+
+    def wrapped(fpath):
+        calls["n"] += 1
+        return real(fpath)
+
+    monkeypatch.setattr(fhost, "_scan_csv_file", wrapped)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "reuse.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+    client.get(path)
+    assert calls["n"] == 1
+
+
+def test_csv_truncated_index_rescans_instead_of_500(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "truncidx.csv")},
+    )
+    path = get_uploaded_path(rv)
+    preview = client.get(path)
+    assert preview.status_code == 200
+    assert get_csv_cfg(preview.get_data(as_text=True))["rows"] == 2
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    index = next(p for p in (storage / ".csv-index").iterdir() if p.is_file())
+    index.write_bytes(index.read_bytes()[:10])
+    preview = client.get(path)
+    assert preview.status_code == 200
+    assert get_csv_cfg(preview.get_data(as_text=True))["rows"] == 2
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"})
+    assert tile.status_code == 200
+    assert tile.get_json()["rows"][0] == ["a", "b"]
+
+
+def test_csv_tile_does_not_load_whole_index(client, monkeypatch):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "seek.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+
+    def boom(self):
+        raise AssertionError("whole index loaded")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    assert client.get(path).status_code == 200
+    assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 200
+    assert client.get("/csv/" + path, query_string={"r": "0", "c": "0"}).status_code == 200
+
+
+def test_csv_tile_parses_quoted_fields_and_escapes(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(
+            b'\xef\xbb\xbfname,note\n'
+            b'Ada,"hello, world"\n'
+            b'Bea,"line1\nline2"\n'
+            b'Cal,"a""b"\n'
+            b'\n'
+            b'1\n'
+            b'<b>,x\n'
+            b'bad,\xff\n'
+        ), "edges.csv")},
+    )
+    path = get_uploaded_path(rv)
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"})
+    assert tile.status_code == 200
+    assert tile.mimetype == "application/json"
+    assert tile.headers["X-Content-Type-Options"] == "nosniff"
+    rows = tile.get_json()["rows"]
+    assert rows[0] == ["name", "note"]
+    assert rows[1] == ["Ada", "hello, world"]
+    assert rows[2] == ["Bea", "line1\nline2"]
+    assert rows[3] == ["Cal", 'a"b']
+    assert rows[4] == []
+    assert rows[5] == ["1"]
+    assert rows[6] == ["<b>", "x"]
+    assert rows[7] == ["bad", "\ufffd"]
+
+
+def test_csv_tile_straddling_quoted_newline_at_block_boundary(client):
+    lines = [b"h\n"]
+    # rows 1..199 ordinary; row 200 (0-based) starts with a quoted newline so block 1 must resume mid-record
+    lines.extend(b"%d\n" % i for i in range(1, 200))
+    lines.append(b'"a\nb"\n')
+    payload = b"".join(lines)
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "span.csv")},
+    )
+    path = get_uploaded_path(rv)
+    assert get_csv_cfg(client.get(path).get_data(as_text=True))["rows"] == 201
+    tile = client.get("/csv/" + path, query_string={"rb": "1", "cb": "0"})
+    assert tile.get_json()["rows"] == [["a\nb"]]
+
+
+def test_csv_cell_returns_full_text_tile_truncates(client):
+    cell = "x" * 60
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(("a\n" + cell + "\n").encode()), "long.csv")},
+    )
+    path = get_uploaded_path(rv)
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).get_json()
+    assert tile["rows"][1] == ["x" * 50]
+    full = client.get("/csv/" + path, query_string={"r": "1", "c": "0"}).get_json()
+    assert full["text"] == cell
+
+
+def test_csv_tile_bounds_and_bad_params(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n1,2\n"), "bounds.csv")},
+    )
+    path = get_uploaded_path(rv)
+    client.get(path)
+    base = "/csv/" + path
+    assert client.get(base, query_string={"rb": "1", "cb": "0"}).get_json() == {"rows": []}
+    assert client.get(base, query_string={"rb": "0", "cb": "1"}).get_json() == {"rows": [[], []]}
+    assert client.get(base, query_string={"r": "9", "c": "0"}).get_json() == {"text": ""}
+    assert client.get(base, query_string={"r": "0", "c": "9"}).get_json() == {"text": ""}
+    assert client.get(base, query_string={"rb": "0"}).status_code == 400
+    assert client.get(base, query_string={"rb": "-1", "cb": "0"}).status_code == 400
+    assert client.get(base).status_code == 400
+
+
+def test_csv_data_rejects_non_csv_and_removed(client):
+    txt = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"hello\n"), "plain.txt")},
+    )
+    assert client.get("/csv/" + get_uploaded_path(txt), query_string={"rb": "0", "cb": "0"}).status_code == 404
+
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a\n"), "gone.csv")},
+    )
+    path = get_uploaded_path(rv)
+    token = path[:-4]
+    f = File.query.filter_by(token=token).first()
+    f.removed = True
+    db.session.commit()
+    assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 451
+
+
+def test_cleanup_skips_csv_index_dir_and_missing_dir(client):
+    import cleanup as cleanup_mod
+    storage = app.config["FHOST_STORAGE_PATH"]
+    Path(storage, ".csv-index").mkdir()
+    cleanup_mod.cleanup_expired(storage, app.config["MAX_CONTENT_LENGTH"])
+    assert Path(storage, ".csv-index").is_dir()
+    import shutil
+    shutil.rmtree(Path(storage, ".csv-index"))
+    cleanup_mod.cleanup_expired(storage, app.config["MAX_CONTENT_LENGTH"])
+
+
+def test_cleanup_deletes_orphan_csv_index(client):
+    import cleanup as cleanup_mod
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    index_dir = storage / ".csv-index"
+    index_dir.mkdir()
+    orphan = index_dir / "deadbeef"
+    tmp = index_dir / "deadbeef.tmp-1-2"
+    orphan.write_bytes(b"x")
+    tmp.write_bytes(b"y")
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert not orphan.exists()
+    assert not tmp.exists()
+
+
+def test_cleanup_keeps_index_for_live_csv_and_drops_it_after_expiry(client):
+    import cleanup as cleanup_mod
+    import time
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"a,b\n"), "keep.csv")},
+    )
+    client.get(get_uploaded_path(rv))
+    fhost = sys.modules["fhost"]
+    storage = Path(app.config["FHOST_STORAGE_PATH"])
+    sha = next(p.name for p in storage.iterdir() if p.is_file())
+    index = storage / ".csv-index" / sha
+    assert index.is_file()
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert index.is_file()
+    old = time.time() - 400 * 86400
+    os.utime(storage / sha, (old, old))
+    cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
+    assert not (storage / sha).exists()
+    assert not index.exists()
 
 
