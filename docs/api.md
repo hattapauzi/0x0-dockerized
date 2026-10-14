@@ -133,7 +133,7 @@ flowchart TD
     ROUTE -- ".csv extension" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
     ROUTE -- "video/* MIME" --> VID["Render Video Player Preview\n(HTML5 <video> + Download Link)"]
     ROUTE -- "raster image/*" --> IMG["Render Image Preview\n(<img> + /raw/ inline bytes)"]
-    ROUTE -- "application/pdf" --> PDF["Render PDF Preview\n(sandboxed iframe + /raw/)"]
+    ROUTE -- "application/pdf" --> PDF["Render PDF Preview\n(iframe + /raw/)"]
     ROUTE -- "text/* MIME" --> TXT["Render Plain Text Preview\n(<pre> + Download Link)"]
     ROUTE -- "Other / Binary" --> BIN["Direct Attachment Download\n(Content-Disposition: attachment)"]
 ```
@@ -176,8 +176,9 @@ flowchart TD
    Sets `X-Content-Type-Options: nosniff`.
 
 6. PDF preview (`application/pdf`).
-   Renders `pdf_preview.html` with a sandboxed iframe (`sandbox="allow-scripts"`, no `allow-same-origin`) whose `src` is `/raw/<link><extension>`.
-   `/raw/` sends `Content-Disposition: inline` and a restrictive CSP.
+   Renders `pdf_preview.html` with an iframe whose `src` is `/raw/<link><extension>`, shown by the browser's built-in PDF viewer.
+   The iframe is not sandboxed: Chromium refuses to load its PDF viewer in sandboxed frames.
+   `/raw/` sends `Content-Disposition: inline` and `nosniff`.
    A Download link points to `/download/<link><extension>`.
    Sets `X-Content-Type-Options: nosniff`.
    Browser PDF engines can still have bugs; this is not a malware scanner.

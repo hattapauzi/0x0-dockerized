@@ -314,7 +314,7 @@ def test_randomized_links_render_text_preview_with_download_link(client):
 
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "line one" in preview_html
     assert "line two" in preview_html
@@ -363,10 +363,10 @@ def test_png_upload_renders_image_preview_with_download_link(client):
     assert preview.mimetype == "text/html"
     preview_html = preview.get_data(as_text=True)
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "<img" in preview_html
-    assert f'src="https://localhost/raw/{file_path}"' in preview_html
+    assert f'src="/raw/{file_path}"' in preview_html
 
     download = client.get(get_download_path(preview_html))
     assert download.status_code == 200
@@ -387,7 +387,7 @@ MINIMAL_PDF = (
 )
 
 
-def test_pdf_upload_renders_sandboxed_preview(client):
+def test_pdf_upload_renders_inline_preview(client):
     rv = client.post(
         "/",
         buffered=True,
@@ -402,11 +402,12 @@ def test_pdf_upload_renders_sandboxed_preview(client):
     assert preview.mimetype == "text/html"
     preview_html = preview.get_data(as_text=True)
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "<iframe" in preview_html
-    assert "sandbox" in preview_html
-    assert f'src="https://localhost/raw/{file_path}"' in preview_html
+    # Chromium refuses to load its PDF viewer in sandboxed frames.
+    assert "sandbox" not in preview_html
+    assert f'src="/raw/{file_path}"' in preview_html
 
     download = client.get(get_download_path(preview_html))
     assert download.status_code == 200
@@ -418,7 +419,8 @@ def test_pdf_upload_renders_sandboxed_preview(client):
     assert media.status_code == 200
     assert media.mimetype == "application/pdf"
     assert media.headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
-    assert "sandbox" in media.headers.get("Content-Security-Policy", "")
+    assert media.headers["X-Content-Type-Options"] == "nosniff"
+    assert "sandbox" not in media.headers.get("Content-Security-Policy", "")
     assert media.get_data() == MINIMAL_PDF
 
 
@@ -768,7 +770,7 @@ def test_markdown_preview_download_link_preserves_filename(client):
     html = preview.get_data(as_text=True)
     download = client.get(get_download_path(html))
 
-    assert '<a href="https://localhost/download/' in html
+    assert '<a href="/download/' in html
     assert ">Download</a>" in html
     assert download.status_code == 200
     assert download.headers["Content-Disposition"] == 'attachment; filename="original name.md"'
@@ -893,10 +895,10 @@ def test_video_upload_renders_player_preview_with_download_link(client):
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "<video controls" in preview_html
-    assert '<source src="https://localhost/download/' in preview_html
+    assert '<source src="/download/' in preview_html
     assert 'type="video/mp4"' in preview_html
 
     download = client.get(get_download_path(preview_html))
@@ -937,7 +939,7 @@ def test_csv_upload_renders_table_preview_with_download_link(client):
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in html
+    assert '<a href="/download/' in html
     assert ">Download</a>" in html
     assert "<pre>a,b" not in html
 

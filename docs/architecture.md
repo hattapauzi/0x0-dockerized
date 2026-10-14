@@ -169,7 +169,7 @@ sequenceDiagram
                 Flask-->>Browser: 200 OK (Render image_preview.html)
                 Browser->>Flask: GET /raw/<link><ext> (inline image)
             else Target is application/pdf
-                Flask-->>Browser: 200 OK (Render pdf_preview.html sandboxed iframe)
+                Flask-->>Browser: 200 OK (Render pdf_preview.html iframe)
                 Browser->>Flask: GET /raw/<link><ext> (inline PDF)
             else Target is text/* MIME
                 Flask-->>Browser: 200 OK (Render preview.html <pre>)
@@ -272,7 +272,7 @@ erDiagram
 ### 5.1 Controls
 1. HMAC-SHA256 link derivation. Public URLs cannot be predicted or listed offline without `FHOST_LINK_SECRET`.
 2. MIME detection. `python-magic` (`libmagic`) reads bytes from the file. A spoofed HTTP `Content-Type` is ignored.
-3. Upload vs preview vs download. Windows executables and Java class/archive files are rejected (MIME and `.exe`/`.jar`/`.class` names). HTML, SVG, XML, and JavaScript are stored and returned as `application/octet-stream` attachments with `nosniff` and a restrictive CSP. Raster images and PDFs preview from `/raw/` (`Content-Disposition: inline`); PDF preview uses a sandboxed iframe. This does not scan for malware.
+3. Upload vs preview vs download. Windows executables and Java class/archive files are rejected (MIME and `.exe`/`.jar`/`.class` names). HTML, SVG, XML, and JavaScript are stored and returned as `application/octet-stream` attachments with `nosniff` and a restrictive CSP. Raster images and PDFs preview from `/raw/` (`Content-Disposition: inline`); PDF preview uses an unsandboxed iframe because Chromium will not load its PDF viewer in sandboxed frames; the browser viewer runs the PDF in its own isolated origin. Preview pages use relative URLs so media loads over whatever scheme served the page. This does not scan for malware.
 4. HTML sanitization. Markdown rendering uses `bleach` to allow tags such as `<p>`, `<h1>`-`<h6>`, `<code>`, `<pre>`, `<table>`, `<a>`, and `<img>`, and to strip scripts and other unsafe tags.
 5. Security headers. Every response includes `X-Content-Type-Options: nosniff`. Downloads use `Content-Disposition: attachment`.
 6. Audit logging. `file_audit` records moderation and cleanup actions. It does not store uploader IP addresses, query parameters, or other personal data.

@@ -369,7 +369,7 @@ def build_file_response(f, fpath, inline=False):
     disposition = "inline" if inline and not is_download_only(f) else "attachment"
     response.headers["Content-Disposition"] = f'{disposition}; filename="{f.getdownloadname()}"'
     response.headers["X-Content-Type-Options"] = "nosniff"
-    if is_download_only(f) or (inline and _bare_mime(f.mime) == "application/pdf"):
+    if is_download_only(f):
         response.headers["Content-Security-Policy"] = (
             "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'"
         )
@@ -452,7 +452,7 @@ def build_markdown_preview_response(f, fpath):
     response = make_response(render_template(
         "markdown_preview.html",
         content=render_markdown(fpath.read_text(encoding="utf-8", errors="replace")),
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -462,7 +462,7 @@ def build_preview_response(f, fpath):
     response = make_response(render_template(
         "preview.html",
         content=fpath.read_text(encoding="utf-8", errors="replace"),
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -471,7 +471,7 @@ def build_preview_response(f, fpath):
 def build_video_preview_response(f, fpath):
     response = make_response(render_template(
         "video_preview.html",
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
         mime=f.mime,
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -481,8 +481,8 @@ def build_video_preview_response(f, fpath):
 def build_image_preview_response(f, fpath):
     response = make_response(render_template(
         "image_preview.html",
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
-        media_url=url_for("raw", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
+        media_url=url_for("raw", path=f.getname()),
         filename=f.getdownloadname(),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -492,8 +492,8 @@ def build_image_preview_response(f, fpath):
 def build_pdf_preview_response(f, fpath):
     response = make_response(render_template(
         "pdf_preview.html",
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
-        media_url=url_for("raw", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
+        media_url=url_for("raw", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -713,7 +713,7 @@ def build_csv_preview_response(f, fpath):
         rows=rows,
         cols=cols,
         stopped=stopped,
-        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        download_url=url_for("download", path=f.getname()),
         data_url=url_for("csv_data", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"

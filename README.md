@@ -18,7 +18,7 @@ A self-hosted file host based on [0x0 / The Null Pointer](https://0x0.st). It ru
   - CSV (`.csv`): virtualized table grid with on-disk block seeking (`.csv-index`), row and column jump boxes, adaptive column widths, and a paginated JSON tile/cell API (`GET /csv/`).
   - Video (`video/*`): HTML5 `<video>` player with HTTP byte-range seeking (`206 Partial Content`).
   - Raster images (`image/*` except SVG): `<img>` preview. Bytes are served inline from `/raw/`.
-  - PDF (`application/pdf`): sandboxed iframe preview. Bytes are served inline from `/raw/`.
+  - PDF (`application/pdf`): iframe preview using the browser's built-in PDF viewer. Bytes are served inline from `/raw/`.
   - Plain text (`text/*`): `<pre>` preview.
 - Downloads through `/download/` keep the original filename. HTML, SVG, XML, and JavaScript are download-only attachments.
 - Identical uploads (same bytes, extension, and original filename) reuse the canonical link and `touch` storage to refresh retention. Distinct filenames for identical bytes get distinct links that point at the same `data/up/<sha256>` payload.
@@ -93,7 +93,7 @@ curl -F'file=@document.md;filename=architecture-spec.md' https://your-domain.exa
   - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link.
   - `video/*` files render an HTML5 video preview.
   - Raster images render an `<img>` preview (SVG stays download-only).
-  - PDFs render in a sandboxed iframe.
+  - PDFs render in an iframe with the browser's PDF viewer.
   - `text/*` files render a plain text preview.
   - Other binaries download as attachments.
 - Inline media: `GET /raw/<link><ext>` returns image and PDF bytes with `Content-Disposition: inline` for the preview tags. HTML/SVG/XML are not served here.
