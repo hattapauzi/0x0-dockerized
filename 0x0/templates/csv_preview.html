@@ -83,6 +83,9 @@
       <a href="{{ download_url }}">Download</a>
       {% if rows > 0 %}
       <label>Row <input id="goto" type="number" min="1" max="{{ rows }}"></label>
+      {% if cols > 0 %}
+      <label>Column <input id="gotocol" type="text" autocomplete="off" spellcheck="false"></label>
+      {% endif %}
       {% endif %}
     </p>
     {% if stopped %}
@@ -159,6 +162,22 @@
           n = Math.floor(n / 26);
         }
         return s;
+      }
+
+      function colIndex(s) {
+        s = String(s || "").trim().toUpperCase();
+        if (/^\d+$/.test(s)) {
+          const n = parseInt(s, 10);
+          return Math.max(0, Math.min(CFG.cols - 1, n - 1));
+        }
+        if (/^[A-Z]+$/.test(s)) {
+          let n = 0;
+          for (let i = 0; i < s.length; i++) {
+            n = n * 26 + (s.charCodeAt(i) - 64);
+          }
+          return Math.max(0, Math.min(CFG.cols - 1, n - 1));
+        }
+        return 0;
       }
 
       function layout(anchor = null, remainder = 0) {
@@ -403,6 +422,19 @@
         scrollbox.scrollTop = rowToScroll(fr);
         draw();
       });
+
+      const gotocol = document.getElementById("gotocol");
+      if (gotocol) {
+        gotocol.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          if (CFG.cols === 0) return;
+          const c = colIndex(gotocol.value);
+          gotocol.value = colLetter(c);
+          scrollbox.scrollLeft = colToScroll(c);
+          draw();
+        });
+      }
 
       updateColumnOffsets();
       layout();

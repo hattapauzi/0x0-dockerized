@@ -727,7 +727,8 @@ def test_csv_preview_grid_chrome_when_rows_exist(client):
     assert 'class="scrollbox"' in html
     assert 'class="sizer"' in html
     assert "<dialog" in html
-    assert 'type="number"' in html
+    assert 'id="goto"' in html
+    assert 'id="gotocol"' in html
     assert "Couldn't read past row" not in html
 
 
@@ -848,6 +849,64 @@ def test_csv_preview_scaled_wheel_advances_variable_width_columns(client):
                 )
             page.mouse.wheel(-1, 0)
             page.wait_for_function("document.querySelector('thead .cell').textContent === 'C'")
+
+
+def test_csv_preview_column_finder_jumps_to_column(client):
+    from playwright.sync_api import sync_playwright
+
+    header = ",".join([f"col_{i+1}" for i in range(54)]) + "\n"
+    row = ",".join([f"val_{i+1}" for i in range(54)]) + "\n"
+    rv = client.post(
+        "/",
+        content_type="multipart/form-data",
+        data={"file": (BytesIO((header + row).encode()), "finder.csv")},
+    )
+    path = get_uploaded_path(rv)
+    html = client.get(path)
+    assert 'id="gotocol"' in html.get_data(as_text=True)
+
+    responses = {
+        "/" + path: html,
+        "/csv/" + path + "?rb=0&cb=0": client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}),
+        "/csv/" + path + "?rb=0&cb=1": client.get("/csv/" + path, query_string={"rb": "0", "cb": "1"}),
+    }
+
+    def serve(route):
+        url = urlparse(route.request.url)
+        response = responses.get(url.path + ("?" + url.query if url.query else ""), html)
+        route.fulfill(status=response.status_code, headers=dict(response.headers), body=response.data)
+
+    with sync_playwright() as playwright:
+        with playwright.chromium.launch(
+            channel="chromium",
+            executable_path=os.environ.get("CHROMIUM_EXECUTABLE_PATH"),
+        ) as browser:
+            page = browser.new_page(viewport={"width": 600, "height": 400})
+            page.set_default_timeout(5000)
+            page.route("http://localhost/**", serve)
+            page.goto("http://localhost/" + path)
+            page.wait_for_function("document.querySelector('tbody td').textContent.length > 0")
+
+            assert page.locator("thead .cell").first.text_content() == "A"
+
+            col_input = page.locator("#gotocol")
+            col_input.fill("AA")
+            col_input.press("Enter")
+            page.wait_for_function("document.querySelector('thead .cell').textContent === 'AA'")
+            assert col_input.input_value() == "AA"
+
+            col_input.fill("28")
+            col_input.press("Enter")
+            page.wait_for_function("document.querySelector('thead .cell').textContent === 'AB'")
+            assert col_input.input_value() == "AB"
+
+            col_input.fill("bb")
+            col_input.press("Enter")
+            page.wait_for_function("""() => {
+                const cell = [...document.querySelectorAll('thead .cell')].find(c => c.textContent === 'BB');
+                return cell && cell.style.visibility !== 'hidden';
+            }""")
+            assert col_input.input_value() == "BB"
 
 
 def test_csv_index_is_reused_on_second_get(client, monkeypatch):
