@@ -41,10 +41,14 @@ POSTGRES_PASSWORD=generate_a_strong_random_password_here
 DATABASE_URI=postgresql://fhost:generate_a_strong_random_password_here@db/fhost
 MAX_SIZE_MB=512
 MAX_SIZE_NGINX=512M
+# Generate a 32-byte (64-character hex) random secret:
+# openssl rand -hex 32
+FHOST_LINK_SECRET=generate_a_64_hex_secret_with_openssl
 ```
 
 > [!IMPORTANT]
-> Never commit `.env` or files inside `data/` to version control.
+> - `FHOST_LINK_SECRET` is strictly required outside test mode. The application fails closed on startup (`RuntimeError`) if it is unset or empty.
+> - Never commit `.env` or files inside `data/` to version control.
 
 ### Step 3: Build and Start Containers
 ```bash
@@ -135,15 +139,28 @@ sudo systemctl reload caddy
 # Upload a test plain text file
 curl -F'file=@0x0/README.rst' https://files.example.com/
 ```
-Output should be a URL such as: `https://files.example.com/aK7mQ2xPdL8N.rst`
+Output is a 64-character hexadecimal HMAC-SHA256 URL, for example:  
+`https://files.example.com/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst`
 
 ### Retrieval Verification
 ```bash
 # 1. Test preview retrieval
-curl -i https://files.example.com/aK7mQ2xPdL8N.rst
+curl -i https://files.example.com/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst
 
 # 2. Test forced download with original filename
-curl -i https://files.example.com/download/aK7mQ2xPdL8N.rst
+curl -i https://files.example.com/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst
+```
+
+### CSV Preview Verification
+```bash
+# 1. Upload a CSV file
+curl -F'file=@test.csv' https://files.example.com/
+
+# 2. Test CSV table preview HTML page
+curl -i https://files.example.com/<link>.csv
+
+# 3. Test CSV tile JSON API
+curl -i "https://files.example.com/csv/<link>.csv?rb=0&cb=0"
 ```
 
 ---
@@ -156,6 +173,26 @@ Old files are subject to expiration based on the retention curve. Run the retent
 ```bash
 docker compose --profile maintenance run --rm cleanup
 ```
+
+### Cleanup Operations Explained
+Running `cleanup.py` executes two coordinated operations:
+1. **Disk Retention Cleanup (`cleanup_expired`):** Computes retention per file size based on the non-linear cubic curve, deletes expired payloads from `data/up/`, and removes orphaned `.csv-index` cache files whose SHA-256 targets have expired.
+2. **Database Data Minimization (`prune_rows`):**
+   - Performs fresh `is_file()` stat checks against disk storage to prevent TOCTOU races with concurrent uploads.
+   - Deletes database rows for unmoderated expired files (`removed=False`), ensuring uploader IP addresses (`addr`) and original filenames do not accumulate indefinitely. Logs `PRUNED_EXPIRED` actions to `file_audit`.
+   - Scrubs uploader IP addresses (`addr = NULL`) on expired moderated files (`removed=True`), minimizing PII while retaining the minimal blocklist entry (`sha256, ext, original_name, link`) needed to return HTTP 451 on re-upload attempts. Logs `MODERATED_ADDR_SCRUBBED` actions to `file_audit`.
+
+### Inspecting the Non-PII Audit Table (`file_audit`)
+The append-only `file_audit` table tracks compliance, cleanup, and moderation events without storing user IP addresses or payload data:
+
+```bash
+docker compose exec db psql -U fhost -d fhost -c "SELECT id, sha256, link, action, created_at FROM file_audit ORDER BY id DESC LIMIT 25;"
+```
+
+Action types:
+- `MODERATED`: File marked as removed by administrator.
+- `PRUNED_EXPIRED`: Expired active database row deleted during retention cleanup.
+- `MODERATED_ADDR_SCRUBBED`: Uploader IP address nulled on expired moderated row.
 
 ### Automated Cleanup via Systemd / Cron
 
@@ -307,6 +344,18 @@ docker compose exec app flask db current
 docker compose exec app flask db upgrade
 ```
 
+### Issue 5: Container fails on startup with `FHOST_LINK_SECRET is required outside testing mode`
+**Cause:** `FHOST_LINK_SECRET` is missing, blank, or not passed into the container environment.  
+**Resolution:**
+1. Check `.env`: ensure `FHOST_LINK_SECRET` is set to a 64-hex string (`openssl rand -hex 32`).
+2. Verify `docker-compose.yml` passes `FHOST_LINK_SECRET: "${FHOST_LINK_SECRET}"` to both `app` and `cleanup` services.
+3. Re-launch stack: `docker compose up -d`.
+
+### Issue 6: PostgreSQL driver URL compatibility
+**Cause:** SQLAlchemy 2.x standard `postgresql://` URL expects `psycopg` (v3) by default, while production uses `psycopg2`.  
+**Resolution:**
+`0x0/instance/config.py` automatically detects when `psycopg` is absent and translates `postgresql://` URIs to `postgresql+psycopg2://`. If using a custom Python environment outside Docker, ensure `psycopg2` (or `psycopg2-binary`) is installed.
+
 ---
 
 ## 9. Rollback Procedure
@@ -318,8 +367,47 @@ If a deployment or upgrade fails:
 git checkout <previous-stable-tag-or-commit>
 
 # 2. If database migration was applied, downgrade revision
+# NOTE: If new uploads occurred since upgrading to revision b2c3d4e5f6a7 (which have token IS NULL),
+# the downgrade script will safely refuse to execute to prevent unintended data loss.
+# To proceed, restore the pre-upgrade PostgreSQL backup or delete new rows:
+# docker compose exec db psql -U fhost -d fhost -c "DELETE FROM file WHERE token IS NULL;"
 docker compose exec app flask db downgrade
 
 # 3. Rebuild and restart
 docker compose up -d --build
 ```
+
+---
+
+## 10. Secret Key Incident Response & Rotation
+
+The `FHOST_LINK_SECRET` environment variable controls HMAC derivation:
+`link = HMAC-SHA256(secret, sha256\0ext\0original_name)`
+
+### Routine Secret Rotation
+Because canonical links are persisted in the `file.link` column:
+- Rotating `FHOST_LINK_SECRET` in `.env` causes subsequent uploads to derive links from the new secret.
+- **Existing links do not break:** Lookups query `file.link` directly, so URLs created under the previous secret remain valid and fully functional.
+
+### Compromise / Leak Incident Response
+If `FHOST_LINK_SECRET` is compromised by an attacker:
+1. The attacker can perform offline dictionary existence checks against known file hashes.
+2. **Remediation Steps:**
+   1. Generate a fresh secret: `openssl rand -hex 32` and update `FHOST_LINK_SECRET` in `.env`.
+   2. Restart services: `docker compose up -d`.
+   3. Recompute canonical links for existing rows using a Python maintenance script inside the container:
+      ```bash
+      docker compose exec app python -c '
+      import hmac, hashlib
+      from fhost import app, db, File
+
+      secret = app.config["FHOST_LINK_SECRET"].encode("utf-8")
+      with app.app_context():
+          for f in File.query.all():
+              msg = f"{f.sha256}\0{f.ext or \"\"}\0{f.original_name or \"\"}".encode("utf-8")
+              f.link = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+          db.session.commit()
+      print("Successfully re-derived canonical links.")
+      '
+      ```
+   4. **Impact Notice:** Re-deriving links changes the canonical URL of all existing hosted files. Any previously distributed URLs will no longer resolve unless re-shared.
