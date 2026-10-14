@@ -39,6 +39,7 @@ def client():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["DATABASE_URI"] = f"sqlite:///{tmpdir}/db.sqlite"
+        os.environ["FHOST_LINK_SECRET"] = "test-secret-value-32-chars-long"
 
         if "fhost" in sys.modules:
             fhost = importlib.reload(sys.modules["fhost"])
@@ -58,6 +59,29 @@ def client():
             with app.app_context():
                 db_upgrade()
             yield client
+
+
+def test_missing_link_secret_raises_outside_testing():
+    old_secret = os.environ.get("FHOST_LINK_SECRET")
+    old_uri = os.environ.get("DATABASE_URI")
+    try:
+        if "FHOST_LINK_SECRET" in os.environ:
+            del os.environ["FHOST_LINK_SECRET"]
+        os.environ["DATABASE_URI"] = "sqlite:///:memory:"
+        if "fhost" in sys.modules:
+            sys.modules["fhost"].app.config["TESTING"] = False
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required"):
+                importlib.reload(sys.modules["fhost"])
+        else:
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required"):
+                importlib.import_module("fhost")
+    finally:
+        if old_secret is not None:
+            os.environ["FHOST_LINK_SECRET"] = old_secret
+        if old_uri is not None:
+            os.environ["DATABASE_URI"] = old_uri
+        if "fhost" in sys.modules:
+            sys.modules["fhost"].app.config["TESTING"] = True
 
 def test_client(client):
     payloads = [

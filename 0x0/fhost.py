@@ -78,10 +78,13 @@ app.config.update(
     NSFW_THRESHOLD = 0.608,
     FHOST_TOKEN_LENGTH = 12,
     URL_ALPHABET = "DEQhd2uFteibPwq0SWBInTpA_jcZL5GKz3YCR14Ulk87Jors9vNHgfaOmMXy6Vx-",
+    FHOST_LINK_SECRET = None,
 )
 
 if not app.config["TESTING"]:
     app.config.from_pyfile("config.py")
+    if not app.config.get("FHOST_LINK_SECRET"):
+        raise RuntimeError("FHOST_LINK_SECRET is required outside testing mode")
     app.jinja_loader = ChoiceLoader([
         FileSystemLoader(str(Path(app.instance_path) / "templates")),
         app.jinja_loader
