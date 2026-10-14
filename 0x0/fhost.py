@@ -83,6 +83,7 @@ app.config.update(
         "text/javascript",
         "text/xml",
     ],
+    FHOST_DOWNLOAD_ONLY_EXTS = (".html", ".htm", ".svg", ".xml", ".js", ".xhtml"),
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
     NSFW_THRESHOLD = 0.608,
@@ -257,7 +258,7 @@ class File(db.Model):
         # Keep .md preview unless the bytes start as an HTML document.
         if (
             ext.lower() == ".md"
-            and mime.split(";", 1)[0].strip().lower() in ("text/html", "application/xhtml+xml")
+            and _bare_mime(mime) in ("text/html", "application/xhtml+xml")
             and not data.lstrip()[:32].lower().startswith((b"<!doctype html", b"<html"))
         ):
             mime = "text/plain; charset=utf-8"
@@ -353,7 +354,9 @@ def _bare_mime(mime):
 
 
 def is_download_only(f):
-    return _bare_mime(f.mime) in app.config["FHOST_DOWNLOAD_ONLY_MIMES"]
+    if _bare_mime(f.mime) in app.config["FHOST_DOWNLOAD_ONLY_MIMES"]:
+        return True
+    return Path("x" + (f.ext or "")).suffix.lower() in app.config["FHOST_DOWNLOAD_ONLY_EXTS"]
 
 
 def build_file_response(f, fpath, inline=False):
@@ -377,7 +380,7 @@ def build_file_response(f, fpath, inline=False):
 
 
 def should_preview_file(f):
-    return bool(f.mime and f.mime.startswith("text/"))
+    return bool(f.mime and f.mime.startswith("text/")) and not is_download_only(f)
 
 
 def should_render_markdown(f):
@@ -389,7 +392,7 @@ def should_preview_video(f):
 
 
 def should_preview_image(f):
-    return _bare_mime(f.mime).startswith("image/")
+    return _bare_mime(f.mime).startswith("image/") and not is_download_only(f)
 
 
 def should_preview_pdf(f):
@@ -484,16 +487,6 @@ def build_image_preview_response(f, fpath):
         download_url=url_for("download", path=f.getname()),
         media_url=url_for("raw", path=f.getname()),
         filename=f.getdownloadname(),
-    ))
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
-
-
-def build_pdf_preview_response(f, fpath):
-    response = make_response(render_template(
-        "pdf_preview.html",
-        download_url=url_for("download", path=f.getname()),
-        media_url=url_for("raw", path=f.getname()),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -781,7 +774,7 @@ def raw(path):
     f, fpath, is_legacy, extra = lookup_file(path)
     if is_legacy:
         return _make_legacy_redirect("raw", f, extra)
-    if is_download_only(f) or not (should_preview_image(f) or should_preview_pdf(f)):
+    if is_download_only(f) or not should_preview_image(f):
         abort(404)
     return build_file_response(f, fpath, inline=True)
 
@@ -859,7 +852,7 @@ def get(path):
         return build_image_preview_response(f, fpath)
 
     if should_preview_pdf(f):
-        return build_pdf_preview_response(f, fpath)
+        return build_file_response(f, fpath, inline=True)
 
     if should_preview_file(f):
         return build_preview_response(f, fpath)

@@ -18,7 +18,7 @@ A self-hosted file host based on [0x0 / The Null Pointer](https://0x0.st). It ru
   - CSV (`.csv`): virtualized table grid with on-disk block seeking (`.csv-index`), row and column jump boxes, adaptive column widths, and a paginated JSON tile/cell API (`GET /csv/`).
   - Video (`video/*`): HTML5 `<video>` player with HTTP byte-range seeking (`206 Partial Content`).
   - Raster images (`image/*` except SVG): `<img>` preview. Bytes are served inline from `/raw/`.
-  - PDF (`application/pdf`): iframe preview using the browser's built-in PDF viewer. Bytes are served inline from `/raw/`.
+  - PDF (`application/pdf`): served inline with `Content-Disposition: inline`, so the browser's built-in PDF viewer handles display and download.
   - Plain text (`text/*`): `<pre>` preview.
 - Downloads through `/download/` keep the original filename. HTML, SVG, XML, and JavaScript are download-only attachments.
 - Identical uploads (same bytes, extension, and original filename) reuse the canonical link and `touch` storage to refresh retention. Distinct filenames for identical bytes get distinct links that point at the same `data/up/<sha256>` payload.
@@ -93,10 +93,10 @@ curl -F'file=@document.md;filename=architecture-spec.md' https://your-domain.exa
   - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link.
   - `video/*` files render an HTML5 video preview.
   - Raster images render an `<img>` preview (SVG stays download-only).
-  - PDFs render in an iframe with the browser's PDF viewer.
+  - PDFs open directly in the browser's built-in PDF viewer (inline bytes, viewer supplies its own download button).
   - `text/*` files render a plain text preview.
   - Other binaries download as attachments.
-- Inline media: `GET /raw/<link><ext>` returns image and PDF bytes with `Content-Disposition: inline` for the preview tags. HTML/SVG/XML are not served here.
+- Inline media: `GET /raw/<link><ext>` returns image bytes with `Content-Disposition: inline` for the `<img>` preview tag. PDFs are served inline at their own URL instead. HTML/SVG/XML are not served here.
   - Legacy URLs (`GET /<token><ext>`) return `301 Moved Permanently` to the canonical link.
 - Forced download: `GET /download/<link><ext>` (for example `https://your-domain.example/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
   - Skips preview pages and sends the file with the original filename in `Content-Disposition`.

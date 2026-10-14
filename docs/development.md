@@ -48,7 +48,7 @@ cd 0x0
 ~/.venvs/0x0/bin/python -m pytest tests/ -q
 ```
 
-All 74 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, image/PDF preview, download-only HTML/SVG/XML, and retention pruning should pass.
+All 75 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, image/PDF preview, download-only HTML/SVG/XML/JS, and retention pruning should pass.
 
 ### Run specific tests
 ```bash
@@ -81,10 +81,11 @@ All 74 tests covering uploads, HMAC derivation, CSV indexing and virtualization,
 │   │   ├── preview.html          # Plain text preview template
 │   │   ├── markdown_preview.html # Markdown + Mermaid.js preview template
 │   │   ├── video_preview.html    # Native HTML5 video player template
+│   │   ├── image_preview.html    # Raster image preview template
 │   │   ├── csv_preview.html      # Virtualized CSV table preview template
-│   │   └── 404.html, etc.        # HTTP error pages
+│   │   └── 404.html, etc.        # HTTP error pages (includes 415.html)
 │   ├── tests/                    # Pytest test suite
-│   │   └── test_client.py        # 67 unit and integration tests
+│   │   └── test_client.py        # 75 unit and integration tests
 │   ├── cleanup.py                # Retention cleanup (storage) and prune_rows (DB minimization)
 │   ├── Dockerfile                # App image build recipe
 │   ├── fhost.py                  # Flask application entrypoint and routing
@@ -152,7 +153,7 @@ Inspect the generated script under `0x0/migrations/versions/`. Check that:
 
 Before opening a pull request:
 
-1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 74 tests must pass).
+1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 75 tests must pass).
 2. Exercise Docker Compose: `docker compose up -d --build` and check upload/download with `curl`.
 3. If you added features or routes, add tests in `0x0/tests/test_client.py`.
 4. Keep working documentation, specs, and plans on a `docs/...` branch. Do not merge feature docs branches into `master`. Merge only the implementation branch (`feat/...` or `fix/...`), leave the docs branch, and name it in the merge commit message.

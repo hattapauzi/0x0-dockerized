@@ -11,7 +11,7 @@ This is the HTTP API for the 0x0-dockerized file host.
 - Legacy 12-character tokens return HTTP 301 to the canonical HMAC URL.
 - Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), and plain text (`text/*`).
 - `/download/` keeps the original filename.
-- `/raw/` serves raster image and PDF bytes inline for preview tags.
+- `/raw/` serves raster image bytes inline for the `<img>` preview tag.
 - Identical bytes, extension, and filename reuse the existing link and refresh retention.
 - Retention follows a size curve. Cleanup prunes database rows and writes audit rows without IP addresses.
 
@@ -133,7 +133,7 @@ flowchart TD
     ROUTE -- ".csv extension" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
     ROUTE -- "video/* MIME" --> VID["Render Video Player Preview\n(HTML5 <video> + Download Link)"]
     ROUTE -- "raster image/*" --> IMG["Render Image Preview\n(<img> + /raw/ inline bytes)"]
-    ROUTE -- "application/pdf" --> PDF["Render PDF Preview\n(iframe + /raw/)"]
+    ROUTE -- "application/pdf" --> PDF["Serve PDF Inline\n(native viewer + its download button)"]
     ROUTE -- "text/* MIME" --> TXT["Render Plain Text Preview\n(<pre> + Download Link)"]
     ROUTE -- "Other / Binary" --> BIN["Direct Attachment Download\n(Content-Disposition: attachment)"]
 ```
@@ -175,11 +175,8 @@ flowchart TD
    A Download link points to `/download/<link><extension>`.
    Sets `X-Content-Type-Options: nosniff`.
 
-6. PDF preview (`application/pdf`).
-   Renders `pdf_preview.html` with an iframe whose `src` is `/raw/<link><extension>`, shown by the browser's built-in PDF viewer.
-   The iframe is not sandboxed: Chromium refuses to load its PDF viewer in sandboxed frames.
-   `/raw/` sends `Content-Disposition: inline` and `nosniff`.
-   A Download link points to `/download/<link><extension>`.
+6. PDF (`application/pdf`).
+   Served directly with `Content-Type: application/pdf` and `Content-Disposition: inline`, so the browser's built-in viewer renders it full-page with its own toolbar and download button. No wrapper template, no `/raw/` hop.
    Sets `X-Content-Type-Options: nosniff`.
    Browser PDF engines can still have bugs; this is not a malware scanner.
 
@@ -355,6 +352,7 @@ These are stored and returned as opaque attachments (`application/octet-stream`,
 - `application/javascript`, `text/javascript`, `application/ecmascript`, `application/x-javascript`
 
 They are never rendered as live pages. `/raw/` does not serve them.
+Filename extensions `.html`, `.htm`, `.svg`, `.xml`, `.js`, and `.xhtml` are also download-only, so a `.js` file libmagic labels `text/plain` is not shown as a text preview.
 
 ---
 

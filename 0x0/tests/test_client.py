@@ -237,6 +237,23 @@ def test_xml_upload_is_served_as_download_only(client):
     assert "sandbox" in response.headers.get("Content-Security-Policy", "")
 
 
+def test_javascript_named_js_is_download_only_even_if_detected_as_plain_text(client):
+    payload = b"function x(){return 1;}\n"
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "app.js")},
+    )
+    assert rv.status_code == 200
+
+    response = client.get(get_uploaded_path(rv))
+    assert response.get_data() == payload
+    assert response.mimetype == "application/octet-stream"
+    assert response.headers["Content-Disposition"] == 'attachment; filename="app.js"'
+    assert "sandbox" in response.headers.get("Content-Security-Policy", "")
+
+
 def test_html_named_as_markdown_is_not_previewed(client):
     payload = b"<html><body><h1>not markdown</h1></body></html>"
     rv = client.post(
@@ -387,7 +404,7 @@ MINIMAL_PDF = (
 )
 
 
-def test_pdf_upload_renders_inline_preview(client):
+def test_pdf_upload_served_inline_for_native_viewer(client):
     rv = client.post(
         "/",
         buffered=True,
@@ -399,29 +416,18 @@ def test_pdf_upload_renders_inline_preview(client):
     preview = client.get(file_path)
 
     assert preview.status_code == 200
-    assert preview.mimetype == "text/html"
-    preview_html = preview.get_data(as_text=True)
+    assert preview.mimetype == "application/pdf"
+    assert preview.headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="/download/' in preview_html
-    assert ">Download</a>" in preview_html
-    assert "<iframe" in preview_html
-    # Chromium refuses to load its PDF viewer in sandboxed frames.
-    assert "sandbox" not in preview_html
-    assert f'src="/raw/{file_path}"' in preview_html
+    assert preview.get_data() == MINIMAL_PDF
 
-    download = client.get(get_download_path(preview_html))
+    download = client.get(f"/download/{file_path}")
     assert download.status_code == 200
     assert download.mimetype == "application/pdf"
     assert download.headers["Content-Disposition"] == 'attachment; filename="doc.pdf"'
     assert download.get_data() == MINIMAL_PDF
 
-    media = client.get(f"/raw/{file_path}")
-    assert media.status_code == 200
-    assert media.mimetype == "application/pdf"
-    assert media.headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
-    assert media.headers["X-Content-Type-Options"] == "nosniff"
-    assert "sandbox" not in media.headers.get("Content-Security-Policy", "")
-    assert media.get_data() == MINIMAL_PDF
+    assert client.get(f"/raw/{file_path}").status_code == 404
 
 
 def test_randomized_links_preserve_uploaded_filename_on_download(client):
