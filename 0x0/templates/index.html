@@ -8,7 +8,9 @@ HTTP POST files here:
 Uploaded file URLs are valid for at least 30 days and up to a year (see below).
 {% set max_size = config["MAX_CONTENT_LENGTH"]|filesizeformat(True) %}
 Maximum file size: {{ max_size }}
-Not allowed: {{ config["FHOST_MIME_BLACKLIST"]|join(", ") }}
+Not allowed: Windows executables and Java class/archive files.
+HTML, SVG, XML, and JavaScript are downloads only (not live pages).
+Uploaded files are not scanned for malware.
 
 
 FILE RETENTION PERIOD

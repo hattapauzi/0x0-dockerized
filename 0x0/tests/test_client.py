@@ -6,6 +6,8 @@ import importlib
 import json
 import re
 from urllib.parse import urlparse
+from werkzeug.http import parse_options_header
+from zipfile import ZipFile
 from flask_migrate import upgrade as db_upgrade
 from io import BytesIO
 from pathlib import Path
@@ -178,14 +180,138 @@ def test_rejects_remote_url_import(client):
     assert rv.status_code == 400
 
 
-def test_html_upload_is_rejected(client):
+@pytest.mark.parametrize("x_accel", [False, True])
+@pytest.mark.parametrize("filename,payload", [
+    ("index.html", b"<!doctype html><html><script>alert(1)</script></html>"),
+    ("logo.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+    ("data.xml", b'<?xml version="1.0"?><root>hello</root>'),
+    ("app.js", b"function x(){return 1;}\n"),
+    ("app.mjs", b"function x(){return 1;}\n"),
+    ("app.cjs", b"function x(){return 1;}\n"),
+    ("page.mhtml", b"MIME-Version: 1.0\nContent-Type: multipart/related; boundary=x\n"),
+    ("page.mht", b"MIME-Version: 1.0\nContent-Type: multipart/related; boundary=x\n"),
+    ("misnamed.png", b"<!doctype html><html><script>alert(1)</script></html>"),
+])
+def test_active_web_upload_is_download_only(client, filename, payload, x_accel):
+    app.config["FHOST_USE_X_ACCEL_REDIRECT"] = x_accel
     rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
-        data={"file": (BytesIO(b"<html></html>"), "index.html", "text/html")},
+        data={"file": (BytesIO(payload), filename)},
+    )
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+
+    for endpoint in (f"/{path}", f"/download/{path}"):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        assert response.mimetype == "application/octet-stream"
+        assert response.headers["Content-Disposition"] == f'attachment; filename="{filename}"'
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Content-Security-Policy"] == (
+            "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'"
+        )
+        assert response.content_length == len(payload)
+        if x_accel:
+            assert response.headers["X-Accel-Redirect"]
+            assert response.get_data() == b""
+        else:
+            assert response.get_data() == payload
+
+    assert client.get(f"/raw/{path}").status_code == 404
+
+
+@pytest.mark.parametrize("payload", [
+    b"<html><body><h1>not markdown</h1></body></html>",
+    b"\xef\xbb\xbf<!doctype html><html><script>alert(1)</script></html>",
+    b"<!--x--><html><script>alert(1)</script></html>",
+    b"<!--x-->\n<!--y-->\n<html><script>alert(1)</script></html>",
+    b"<script>alert(1)</script>",
+    b"\xc2\xa0<html><script>alert(1)</script></html>",
+    b'<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><h1>x</h1></html>',
+])
+def test_html_named_as_markdown_is_not_previewed(client, payload):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "readme.md", "text/html")},
+    )
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+
+    for endpoint in (f"/{path}", f"/download/{path}"):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        assert response.get_data() == payload
+        assert response.mimetype == "application/octet-stream"
+        assert response.headers["Content-Disposition"] == 'attachment; filename="readme.md"'
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Content-Security-Policy"] == (
+            "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'"
+        )
+    assert client.get(f"/raw/{path}").status_code == 404
+
+
+@pytest.mark.parametrize("filename", ["setup.exe", "renamed.txt", "extensionless", "SETUP.EXE"])
+def test_windows_executable_upload_is_rejected_with_explanation(client, filename):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"MZ" + b"\x00" * 64), filename)},
+    )
+    body = rv.get_data(as_text=True)
+    assert rv.status_code == 415
+    assert "executable" in body.lower()
+    assert "Segmentation fault" not in body
+    assert "application/x-dosexec" in body
+
+
+def test_plain_text_with_executable_extension_is_rejected(client):
+    rv = client.post("/", data={"file": (BytesIO(b"hello"), "setup.exe")})
+    assert rv.status_code == 415
+    assert "executable" in rv.get_data(as_text=True).lower()
+
+
+def test_java_archive_mime_is_rejected_without_jar_extension(client, monkeypatch):
+    import fhost
+
+    payload = BytesIO()
+    with ZipFile(payload, "w") as archive:
+        archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+        archive.writestr("Main.class", b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + b"\x00" * 32)
+    payload.seek(0)
+    # libmagic versions disagree between application/zip and application/java-archive.
+    monkeypatch.setattr(fhost.mimedetect, "from_buffer", lambda data: "application/java-archive")
+    rv = client.post("/", data={"file": (payload, "renamed.zip")})
+    assert rv.status_code == 415
+    assert "application/java-archive" in rv.get_data(as_text=True)
+
+
+def test_java_class_upload_is_rejected(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(bytes([0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34]) + b"\x00" * 32), "Main.class")},
+    )
+    body = rv.get_data(as_text=True)
+    assert rv.status_code == 415
+    assert "executable" in body.lower()
+    assert "Segmentation fault" not in body
+
+
+def test_jar_upload_is_rejected(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"PK\x03\x04" + b"\x00" * 26), "app.jar")},
     )
     assert rv.status_code == 415
+    assert "executable" in rv.get_data(as_text=True).lower()
 
 
 def test_rejects_generic_url_shortening(client):
@@ -212,10 +338,11 @@ def test_randomized_links_render_text_preview_with_download_link(client):
 
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "line one" in preview_html
     assert "line two" in preview_html
+    assert client.get(f"/raw/{preview_path}").status_code == 404
 
     download = client.get(get_download_path(preview_html))
 
@@ -239,31 +366,121 @@ def test_text_preview_escapes_html_like_content(client):
     assert "<b>bold</b>" not in preview_html
 
 
-def test_non_text_files_still_download_directly(client):
+PNG_1X1 = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x02"
+    b"\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def test_png_upload_renders_image_preview_with_download_link(client):
     rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
-        data={
-            "file": (
-                BytesIO(
-                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-                    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x02"
-                    b"\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
-                ),
-                "image.png",
-                "image/png",
-            )
-        },
+        data={"file": (BytesIO(PNG_1X1), "image.png", "image/png")},
     )
 
     file_path = get_uploaded_path(rv)
-    download = client.get(file_path)
+    preview = client.get(file_path)
 
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    preview_html = preview.get_data(as_text=True)
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="/download/' in preview_html
+    assert ">Download</a>" in preview_html
+    assert "<img" in preview_html
+    assert f'src="/raw/{file_path}"' in preview_html
+
+    download = client.get(get_download_path(preview_html))
     assert download.status_code == 200
     assert download.mimetype == "image/png"
     assert download.headers["Content-Disposition"] == 'attachment; filename="image.png"'
-    assert "href=" not in download.get_data(as_text=False).decode("latin1", errors="ignore")
+    assert download.get_data() == PNG_1X1
+
+    media = client.get(f"/raw/{file_path}")
+    assert media.status_code == 200
+    assert media.mimetype == "image/png"
+    assert media.headers["Content-Disposition"] == 'inline; filename="image.png"'
+    assert media.get_data() == PNG_1X1
+
+
+@pytest.mark.parametrize("x_accel", [False, True])
+@pytest.mark.parametrize("filename", ['quote".png', 'foo"; filename=evil.png', 'back\\slash.png', 'café.png', '画像.png'])
+def test_download_filename_is_safely_encoded(client, filename, x_accel):
+    app.config["FHOST_USE_X_ACCEL_REDIRECT"] = x_accel
+    # The test client's tuple shorthand does not escape multipart filenames.
+    upload_name = filename.replace("\\", "\\\\").replace('"', '\\"')
+    multipart = (
+        f'--boundary\r\nContent-Disposition: form-data; name="file"; filename="{upload_name}"\r\n'
+        'Content-Type: image/png\r\n\r\n'
+    ).encode("utf-8") + PNG_1X1 + b"\r\n--boundary--\r\n"
+    rv = client.post("/", data=multipart, content_type="multipart/form-data; boundary=boundary")
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+
+    for endpoint, disposition in ((f"/download/{path}", "attachment"), (f"/raw/{path}", "inline")):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        header = response.headers["Content-Disposition"]
+        assert header.isascii()
+        kind, options = parse_options_header(header)
+        assert kind == disposition
+        assert options == {"filename": filename}
+        assert response.mimetype == "image/png"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        if not x_accel:
+            assert response.get_data() == PNG_1X1
+
+
+def test_legacy_filename_cannot_inject_header_lines(client):
+    rv = client.post("/", data={"file": (BytesIO(PNG_1X1), "image.png")})
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+    with app.app_context():
+        f = File.query.filter_by(link=path.split(".", 1)[0]).one()
+        f.original_name = "line\r\nbreak.png"
+        db.session.commit()
+
+    for endpoint in (f"/download/{path}", f"/raw/{path}"):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        _, options = parse_options_header(response.headers["Content-Disposition"])
+        assert options == {"filename": "linebreak.png"}
+        assert response.get_data() == PNG_1X1
+
+
+MINIMAL_PDF = (
+    b"%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+
+
+def test_pdf_upload_served_inline_for_native_viewer(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(MINIMAL_PDF), "doc.pdf")},
+    )
+
+    file_path = get_uploaded_path(rv)
+    preview = client.get(file_path)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "application/pdf"
+    assert preview.headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert preview.get_data() == MINIMAL_PDF
+
+    download = client.get(f"/download/{file_path}")
+    assert download.status_code == 200
+    assert download.mimetype == "application/pdf"
+    assert download.headers["Content-Disposition"] == 'attachment; filename="doc.pdf"'
+    assert download.get_data() == MINIMAL_PDF
+
+    assert client.get(f"/raw/{file_path}").status_code == 404
 
 
 def test_randomized_links_preserve_uploaded_filename_on_download(client):
@@ -612,7 +829,7 @@ def test_markdown_preview_download_link_preserves_filename(client):
     html = preview.get_data(as_text=True)
     download = client.get(get_download_path(html))
 
-    assert '<a href="https://localhost/download/' in html
+    assert '<a href="/download/' in html
     assert ">Download</a>" in html
     assert download.status_code == 200
     assert download.headers["Content-Disposition"] == 'attachment; filename="original name.md"'
@@ -665,18 +882,25 @@ def test_plain_text_preview_does_not_include_mermaid(client):
     assert "```mermaid" in html
 
 
-def test_markdown_preview_sanitizes_script_tags(client):
+@pytest.mark.parametrize("prefix", [b"", b"<!-- Markdown comment -->\n\n"])
+def test_markdown_preview_sanitizes_script_tags(client, prefix):
     rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
-        data={"file": (BytesIO(b"# Safe\n\nRegular Markdown paragraph before raw HTML.\n\n<script>alert('x')</script>\n"), "unsafe.md")},
+        data={"file": (BytesIO(prefix + b"# Safe\n\nRegular Markdown paragraph before raw HTML.\n\n<script>alert('x')</script>\n"), "unsafe.md")},
     )
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+    preview = client.get(path)
+    html = preview.get_data(as_text=True)
 
-    html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
-
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    assert "<h1>Safe</h1>" in html
     assert "<script>alert('x')</script>" not in html
-    assert "<script" not in html
+    with app.app_context():
+        assert File.query.filter_by(link=path.split(".", 1)[0]).one().mime == "text/plain; charset=utf-8"
 
 
 def test_markdown_preview_sanitizes_inline_event_attributes(client):
@@ -738,10 +962,10 @@ def test_video_upload_renders_player_preview_with_download_link(client):
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in preview_html
+    assert '<a href="/download/' in preview_html
     assert ">Download</a>" in preview_html
     assert "<video controls" in preview_html
-    assert '<source src="https://localhost/download/' in preview_html
+    assert '<source src="/download/' in preview_html
     assert 'type="video/mp4"' in preview_html
 
     download = client.get(get_download_path(preview_html))
@@ -782,7 +1006,7 @@ def test_csv_upload_renders_table_preview_with_download_link(client):
     assert preview.status_code == 200
     assert preview.mimetype == "text/html"
     assert preview.headers["X-Content-Type-Options"] == "nosniff"
-    assert '<a href="https://localhost/download/' in html
+    assert '<a href="/download/' in html
     assert ">Download</a>" in html
     assert "<pre>a,b" not in html
 
@@ -790,6 +1014,29 @@ def test_csv_upload_renders_table_preview_with_download_link(client):
     assert download.status_code == 200
     assert download.headers["Content-Disposition"] == 'attachment; filename="sheet.csv"'
     assert download.get_data() == b"a,b\n1,2\n"
+
+
+def test_csv_with_html_mime_keeps_table_preview(client):
+    payload = b"col\n<!doctype html><html>x</html>\n"
+    rv = client.post("/", data={"file": (BytesIO(payload), "pages.csv")})
+    assert rv.status_code == 200
+    path = get_uploaded_path(rv)
+    with app.app_context():
+        assert File.query.filter_by(link=path.split(".", 1)[0]).one().mime.startswith("text/html")
+
+    preview = client.get(path)
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    cfg = get_csv_cfg(preview.get_data(as_text=True))
+    assert cfg["rows"] == 2
+    assert cfg["cols"] == 1
+    tile = client.get(f"/csv/{path}?rb=0&cb=0")
+    assert tile.status_code == 200
+    assert tile.get_json() == {"rows": [["col"], ["<!doctype html><html>x</html>"]]}
+    download = client.get(f"/download/{path}")
+    assert download.mimetype == "application/octet-stream"
+    assert download.get_data() == payload
+    assert client.get(f"/raw/{path}").status_code == 404
 
 
 def test_compound_csv_extension_gets_table_preview(client):

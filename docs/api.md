@@ -9,8 +9,9 @@ This is the HTTP API for the 0x0-dockerized file host.
 - Direct file uploads via `multipart/form-data` POST.
 - Canonical URLs are 64-character hexadecimal HMAC-SHA256 digests. Without `FHOST_LINK_SECRET`, a guessed URL does not tell you whether a file exists.
 - Legacy 12-character tokens return HTTP 301 to the canonical HMAC URL.
-- Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), and plain text (`text/*`).
+- Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), raster images, PDFs, and plain text (`text/*`).
 - `/download/` keeps the original filename.
+- `/raw/` serves raster image bytes inline for the `<img>` preview tag.
 - Identical bytes, extension, and filename reuse the existing link and refresh retention.
 - Retention follows a size curve. Cleanup prunes database rows and writes audit rows without IP addresses.
 
@@ -127,9 +128,12 @@ flowchart TD
     MATCH_LINK -- "Missing storage" --> E404
     MATCH_LINK -- "Valid" --> ROUTE{"File Type Check"}
 
-    ROUTE -- ".md extension" --> MD["Render Markdown Preview\n(HTML + Mermaid.js + Download Link)"]
-    ROUTE -- ".csv extension" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
+    ROUTE -- ".csv extension (first)" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
+    ROUTE -- "Download-only MIME or extension" --> DLONLY["Opaque octet-stream attachment\n(CSP sandbox, never live render)"]
+    ROUTE -- ".md, not download-only" --> MD["Render Markdown Preview\n(HTML + Mermaid.js + Download Link)"]
     ROUTE -- "video/* MIME" --> VID["Render Video Player Preview\n(HTML5 <video> + Download Link)"]
+    ROUTE -- "raster image/*" --> IMG["Render Image Preview\n(<img> + /raw/ inline bytes)"]
+    ROUTE -- "application/pdf" --> PDF["Serve PDF Inline\n(native viewer + its download button)"]
     ROUTE -- "text/* MIME" --> TXT["Render Plain Text Preview\n(<pre> + Download Link)"]
     ROUTE -- "Other / Binary" --> BIN["Direct Attachment Download\n(Content-Disposition: attachment)"]
 ```
@@ -142,13 +146,14 @@ flowchart TD
 
 2. Markdown preview (`.md` files).
    Renders HTML from Markdown (headings, lists, blockquotes, code blocks, tables).
+   Markdown with embedded HTML still gets a sanitized preview. HTML documents named `.md` stay download-only: the upload check skips a UTF-8 BOM, whitespace, and leading HTML comments, then checks for `<!doctype`, `<html`, `<?xml`, or `<script`.
    `bleach` strips HTML tags and attributes that are not on the allow list, which blocks XSS.
    Mermaid diagrams in ` ```mermaid ` blocks are drawn in the browser.
    A Download link at the top points to `/download/<link><extension>`.
    Sets `X-Content-Type-Options: nosniff`.
 
 3. CSV table preview (`.csv` files).
-   Renders `csv_preview.html`.
+   Renders `csv_preview.html`, even if libmagic detects HTML in a cell. This extension-based preview runs before the download-only check; cells are displayed as text, not live HTML. Downloads still apply the download-only MIME policy.
    The grid paints only visible cells.
    Row numbers and column letters (`A`, `B`, … `AA`, and so on) are generated.
    Toolbar Row and Column boxes jump to coordinates.
@@ -165,11 +170,26 @@ flowchart TD
    The player source is `/download/<link><extension>`, which accepts HTTP Range requests (`206 Partial Content`).
    Sets `X-Content-Type-Options: nosniff`.
 
-5. Plain text preview (`text/*` files that are not `.md` or `.csv`).
+5. Raster image preview (`image/*` except SVG).
+   Renders `image_preview.html` with an `<img>` whose `src` is `/raw/<link><extension>` (`Content-Disposition: inline`).
+   SVG is not included; it is download-only.
+   A Download link points to `/download/<link><extension>`.
+   Sets `X-Content-Type-Options: nosniff`.
+
+6. PDF (`application/pdf`).
+   Served directly with `Content-Type: application/pdf` and `Content-Disposition: inline`, so the browser's built-in viewer renders it full-page with its own toolbar and download button. No wrapper template, no `/raw/` hop.
+   Sets `X-Content-Type-Options: nosniff`.
+   Browser PDF engines can still have bugs; this is not a malware scanner.
+
+7. Plain text preview (`text/*` files that are not `.md`, `.csv`, HTML, XML, or JavaScript).
    Renders HTML with a Download link and HTML-escaped text inside `<pre>`.
    Sets `X-Content-Type-Options: nosniff`.
 
-6. Binary and other files (for example `.png`, `.pdf`, `.zip`, `.tar.gz`).
+8. Download-only active web content (HTML, XHTML, MHTML, SVG, XML, JavaScript).
+   Returns the original bytes as `application/octet-stream` with `Content-Disposition: attachment` and `Content-Security-Policy: sandbox; default-src 'none'; base-uri 'none'; form-action 'none'`.
+   `/raw/` returns `404` for these files. CSV files use the safe table preview described above; `/download/` still returns opaque bytes.
+
+9. Other binaries (for example `.zip`, `.tar.gz`).
    Returns the bytes with `Content-Disposition: attachment; filename="<original_filename>"`.
    Sets `X-Content-Type-Options: nosniff`.
 
@@ -177,12 +197,15 @@ flowchart TD
 ```bash
 curl -i https://your-domain.example/8a9f60d3d526e85bd68e7ec8d21c3b5d2e3894df051394b0ac045e7f1bc8f8c7.png
 ```
-Response headers:
+Response is an HTML image preview. Inline bytes:
+
+```bash
+curl -i https://your-domain.example/raw/8a9f60d3d526e85bd68e7ec8d21c3b5d2e3894df051394b0ac045e7f1bc8f8c7.png
+```
 ```http
 HTTP/1.1 200 OK
 Content-Type: image/png
-Content-Disposition: attachment; filename="document.png"
-Content-Length: 120485
+Content-Disposition: inline; filename="document.png"
 X-Content-Type-Options: nosniff
 ```
 
@@ -204,9 +227,10 @@ Download any file as an attachment, skipping HTML preview pages, and keep the or
 #### Response headers
 | Header | Value | Description |
 |---|---|---|
-| `Content-Type` | MIME type (for example `video/mp4`, `text/csv`, `text/markdown`) | MIME type of stored content. |
-| `Content-Disposition` | `attachment; filename="<original_filename>"` | Forces a download with the original filename. |
+| `Content-Type` | Stored MIME, or `application/octet-stream` | Download-only MIME types and extensions always use `application/octet-stream` on this endpoint. |
+| `Content-Disposition` | `attachment; filename="<original_filename>"` | Forces a download. Quotes and backslashes are escaped; non-ASCII names also have a UTF-8 `filename*` parameter and an ASCII fallback. |
 | `X-Content-Type-Options` | `nosniff` | Stops the browser from MIME sniffing. |
+| `Content-Security-Policy` | `sandbox; default-src 'none'; base-uri 'none'; form-action 'none'` | Set for download-only content. |
 | `Accept-Ranges` | `bytes` | Allows byte-range seeking for media. |
 
 #### Example
@@ -304,25 +328,33 @@ Tells crawlers not to index hosted files.
 | `411 Length Required` | Length required | Request submitted without a `Content-Length` header. |
 | `413 Payload Too Large` | Payload too large | Upload exceeds `MAX_CONTENT_LENGTH`. |
 | `414 URI Too Long` | URI too long | Request URL exceeds `MAX_URL_LENGTH` (4096 bytes). |
-| `415 Unsupported Media Type` | Unsupported media type | Uploaded file matches `FHOST_MIME_BLACKLIST`. |
+| `415 Unsupported Media Type` | Unsupported media type | Uploaded file is a Windows executable or Java class/archive (`FHOST_MIME_BLACKLIST` or `.exe`/`.jar`/`.class`). |
 | `451 Unavailable For Legal Reasons` | Blocked content | File marked as `removed`, client IP in `FHOST_UPLOAD_BLACKLIST`, or re-upload of removed content. |
 
 ---
 
 ## Security and content policies
 
-### Blocked MIME types (`FHOST_MIME_BLACKLIST`)
-Executable payloads and active web content are rejected with HTTP 415:
+### Blocked uploads (`FHOST_MIME_BLACKLIST` and executable names)
+These are rejected with HTTP 415:
 
-- `application/xml`
-- `application/xhtml+xml`
 - `application/x-dosexec` (Windows/DOS executables)
-- `application/java-archive` (`.jar`)
-- `application/java-vm` (`.class`)
-- `image/svg+xml` (SVG, which can carry inline scripts)
-- `text/html` (HTML, which can carry inline scripts)
+- `application/java-archive` (`.jar` when detected as such)
+- `application/java-vm` / `application/x-java-applet` (`.class`)
+- Filenames ending in `.exe`, `.jar`, or `.class` (JARs are often detected as ZIP)
 
-`python-magic` (`libmagic`) reads MIME type from the raw bytes, so a renamed extension does not bypass the check.
+`python-magic` (`libmagic`) reads MIME type from the raw bytes, so renaming an EXE to `.txt` does not bypass the check. The 415 body names the detected type. JARs detected as ordinary ZIP archives can be accepted without a `.jar` filename; archive entries are not inspected. This is not antivirus scanning.
+
+### Download-only types (`FHOST_DOWNLOAD_ONLY_MIMES` and `FHOST_DOWNLOAD_ONLY_EXTS`)
+These are stored and returned as opaque attachments (`application/octet-stream`, `nosniff`, CSP `sandbox`):
+
+- `text/html`, `application/xhtml+xml`
+- `image/svg+xml`
+- `application/xml`, `text/xml`
+- `application/javascript`, `text/javascript`, `application/ecmascript`, `application/x-javascript`
+
+They are never rendered as live pages. `/raw/` does not serve them. CSV cells and embedded HTML in Markdown may appear in safe previews, as described above.
+Filename extensions `.html`, `.htm`, `.svg`, `.xml`, `.js`, `.xhtml`, `.mhtml`, `.mht`, `.mjs`, and `.cjs` are also download-only, so JavaScript or MHTML that libmagic labels `text/plain` is not shown as a text preview.
 
 ---
 

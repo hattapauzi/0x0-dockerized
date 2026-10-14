@@ -17,14 +17,17 @@ A self-hosted file host based on [0x0 / The Null Pointer](https://0x0.st). It ru
   - Markdown (`.md`): server-rendered Markdown with Bleach HTML sanitization, tables, and client-side Mermaid diagrams.
   - CSV (`.csv`): virtualized table grid with on-disk block seeking (`.csv-index`), row and column jump boxes, adaptive column widths, and a paginated JSON tile/cell API (`GET /csv/`).
   - Video (`video/*`): HTML5 `<video>` player with HTTP byte-range seeking (`206 Partial Content`).
+  - Raster images (`image/*` except SVG): `<img>` preview. Bytes are served inline from `/raw/`.
+  - PDF (`application/pdf`): served inline with `Content-Disposition: inline`, so the browser's built-in PDF viewer handles display and download.
   - Plain text (`text/*`): `<pre>` preview.
-- Downloads through `/download/` and direct binary links keep the original filename.
+- Downloads through `/download/` keep the original filename. HTML, SVG, XML, and JavaScript are download-only attachments.
 - Identical uploads (same bytes, extension, and original filename) reuse the canonical link and `touch` storage to refresh retention. Distinct filenames for identical bytes get distinct links that point at the same `data/up/<sha256>` payload.
 - Retention scales from 30 days at maximum file size to 365 days for small files. Cleanup deletes expired disk files and unmoderated database rows, sets `addr = NULL` on moderated records, and writes events to a `file_audit` table that does not store IP addresses.
 - Security:
   - `FHOST_LINK_SECRET` is required outside test mode.
   - Re-upload of moderated content returns `451 Unavailable For Legal Reasons`.
-  - HTML, SVG, XML, Java archives, and Windows executables return `415 Unsupported Media Type` by default.
+  - Detected Windows executables and Java class/archive files, plus `.exe`/`.jar`/`.class` filenames, return `415 Unsupported Media Type`. A JAR detected as ZIP can be accepted if renamed; archive entries are not inspected.
+  - HTML (including MHTML), SVG, XML, and JavaScript (including `.mjs`/`.cjs`) download as opaque attachments (`application/octet-stream`); they are not rendered as live pages. CSV cells and embedded HTML in Markdown are shown only through their safe previews.
   - Remote URL import and generic URL shortening are off.
   - Responses include `X-Content-Type-Options: nosniff`.
   - The app runs as user `app` (UID/GID 1000).
@@ -86,11 +89,14 @@ curl -F'file=@document.md;filename=architecture-spec.md' https://your-domain.exa
 
 ### Retrieving and downloading files
 - View / preview: `GET /<link><ext>` (for example `https://your-domain.example/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
-  - `.md` files render a Markdown preview with Mermaid diagrams and a Download link.
-  - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link.
+  - `.md` files render a sanitized Markdown preview with Mermaid diagrams and a Download link. HTML documents named `.md` stay download-only.
+  - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link, even when libmagic detects HTML in a cell.
   - `video/*` files render an HTML5 video preview.
+  - Raster images render an `<img>` preview (SVG stays download-only).
+  - PDFs open directly in the browser's built-in PDF viewer (inline bytes, viewer supplies its own download button).
   - `text/*` files render a plain text preview.
-  - Binary and other media download as attachments.
+  - Other binaries download as attachments.
+- Inline media: `GET /raw/<link><ext>` returns image bytes with `Content-Disposition: inline` for the `<img>` preview tag. PDFs are served inline at their own URL instead. HTML/SVG/XML/JavaScript are not served here.
   - Legacy URLs (`GET /<token><ext>`) return `301 Moved Permanently` to the canonical link.
 - Forced download: `GET /download/<link><ext>` (for example `https://your-domain.example/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
   - Skips preview pages and sends the file with the original filename in `Content-Disposition`.
