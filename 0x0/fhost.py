@@ -31,6 +31,7 @@ from mimetypes import guess_extension
 import bleach
 import csv
 import fcntl
+import hmac
 import json
 import markdown
 import os
@@ -130,10 +131,27 @@ class URL(db.Model):
 
         return u
 
+def make_link(sha256_val, ext_val, original_name_val, secret=None):
+    if secret is None:
+        secret = app.config.get("FHOST_LINK_SECRET") or b"test-secret"
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\0".join([sha256_val or "", ext_val or "", original_name_val or ""])
+    return hmac.new(secret, msg.encode("utf-8"), "sha256").hexdigest()
+
+class FileAudit(db.Model):
+    __tablename__ = "file_audit"
+    id = db.Column(db.Integer, primary_key=True)
+    sha256 = db.Column(db.String, nullable=False, index=True)
+    link = db.Column(db.String(64), nullable=True, index=True)
+    action = db.Column(db.String(32), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
 class File(db.Model):
     id = db.Column(db.Integer, primary_key = True)
-    sha256 = db.Column(db.String)
-    token = db.Column(db.String(32), unique = True, nullable = False)
+    sha256 = db.Column(db.String, index = True)
+    token = db.Column(db.String(32), unique = False, nullable = True)
+    link = db.Column(db.String(64), nullable = False)
     ext = db.Column(db.UnicodeText)
     mime = db.Column(db.UnicodeText)
     addr = db.Column(db.UnicodeText)
@@ -141,13 +159,14 @@ class File(db.Model):
     nsfw_score = db.Column(db.Float)
     original_name = db.Column(db.UnicodeText)
 
-    def __init__(self, sha256, token, ext, mime, addr, original_name=None):
+    def __init__(self, sha256, token, ext, mime, addr, original_name=None, link=None):
         self.sha256 = sha256
         self.token = token
         self.ext = ext
         self.mime = mime
         self.addr = addr
         self.original_name = original_name
+        self.link = link or make_link(sha256, ext, original_name)
 
     def getname(self):
         return u"{0}{1}".format(self.token, self.ext)

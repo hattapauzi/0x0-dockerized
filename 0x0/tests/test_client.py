@@ -83,6 +83,23 @@ def test_missing_link_secret_raises_outside_testing():
         if "fhost" in sys.modules:
             sys.modules["fhost"].app.config["TESTING"] = True
 
+
+def test_models_have_link_and_file_audit(client):
+    import fhost
+    File = fhost.File
+    FileAudit = fhost.FileAudit
+    assert hasattr(File, "link")
+    assert File.token.property.columns[0].nullable is True
+    assert FileAudit.__tablename__ == "file_audit"
+
+    with app.app_context():
+        audit = FileAudit(sha256="test-sha", link="test-link", action="TEST_ACTION")
+        db.session.add(audit)
+        db.session.commit()
+        assert audit.id is not None
+        assert audit.created_at is not None
+
+
 def test_client(client):
     payloads = [
         ({ "file" : (BytesIO(b"hello"), "hello.txt") }, 200),
