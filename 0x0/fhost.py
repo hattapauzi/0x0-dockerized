@@ -26,6 +26,8 @@ from sqlalchemy.exc import IntegrityError
 from jinja2.exceptions import *
 from jinja2 import ChoiceLoader, FileSystemLoader
 from markupsafe import Markup
+from urllib.parse import quote
+from werkzeug.http import quote_header_value
 from hashlib import sha256
 from magic import Magic
 from mimetypes import guess_extension
@@ -71,6 +73,7 @@ app.config.update(
         "application/java-vm",
         "application/x-java-applet",
     ],
+    # shortcut: JARs detected as ZIP rely on .jar names; inspect entries if stricter blocking is needed.
     FHOST_EXECUTABLE_EXTS = (".exe", ".jar", ".class"),
     FHOST_DOWNLOAD_ONLY_MIMES = [
         "application/javascript",
@@ -83,7 +86,9 @@ app.config.update(
         "text/javascript",
         "text/xml",
     ],
-    FHOST_DOWNLOAD_ONLY_EXTS = (".html", ".htm", ".svg", ".xml", ".js", ".xhtml"),
+    FHOST_DOWNLOAD_ONLY_EXTS = (
+        ".html", ".htm", ".svg", ".xml", ".js", ".xhtml", ".mhtml", ".mht", ".mjs", ".cjs",
+    ),
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
     NSFW_THRESHOLD = 0.608,
@@ -254,14 +259,12 @@ class File(db.Model):
 
         mime = get_mime()
         ext = get_ext(mime)
-        # libmagic treats Markdown that contains <script> as text/html.
-        # Keep .md preview unless the bytes start as an HTML document.
-        if (
-            ext.lower() == ".md"
-            and _bare_mime(mime) in ("text/html", "application/xhtml+xml")
-            and not data.lstrip()[:32].lower().startswith((b"<!doctype html", b"<html"))
-        ):
-            mime = "text/plain; charset=utf-8"
+        # libmagic also labels Markdown containing embedded scripts as HTML.
+        if ext.lower() == ".md" and _bare_mime(mime) in ("text/html", "application/xhtml+xml"):
+            document = data.decode("utf-8-sig", errors="replace")
+            start = re.match(r"\s*(?:<!--.*?-->\s*)*", document, re.DOTALL).end()
+            if not document[start:start + 16].lower().startswith(("<!doctype", "<html", "<?xml", "<script")):
+                mime = "text/plain; charset=utf-8"
         original_name = get_original_name(ext)
         link = make_link(digest, ext, original_name)
 
@@ -370,7 +373,13 @@ def build_file_response(f, fpath, inline=False):
 
     response.headers["Content-Type"] = mime
     disposition = "inline" if inline and not is_download_only(f) else "attachment"
-    response.headers["Content-Disposition"] = f'{disposition}; filename="{f.getdownloadname()}"'
+    filename = f.getdownloadname().replace("\r", "").replace("\n", "")
+    ascii_filename = filename.encode("ascii", "ignore").decode("ascii")
+    response.headers["Content-Disposition"] = (
+        f"{disposition}; filename={quote_header_value(ascii_filename, allow_token=False)}"
+    )
+    if ascii_filename != filename:
+        response.headers["Content-Disposition"] += f"; filename*=UTF-8''{quote(filename, safe='')}"
     response.headers["X-Content-Type-Options"] = "nosniff"
     if is_download_only(f):
         response.headers["Content-Security-Policy"] = (
@@ -836,14 +845,14 @@ def get(path):
     if is_legacy:
         return _make_legacy_redirect("get", f, extra)
 
+    if should_render_csv(f):
+        return build_csv_preview_response(f, fpath)
+
     if is_download_only(f):
         return build_file_response(f, fpath)
 
     if should_render_markdown(f):
         return build_markdown_preview_response(f, fpath)
-
-    if should_render_csv(f):
-        return build_csv_preview_response(f, fpath)
 
     if should_preview_video(f):
         return build_video_preview_response(f, fpath)

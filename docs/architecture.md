@@ -151,16 +151,16 @@ sequenceDiagram
         alt File missing from disk
             Flask-->>Browser: 404 Not Found
         else File valid
-            alt Target is .md file
-                Flask->>Flask: Parse Markdown, sanitize with Bleach, inject Mermaid wrappers
-                Flask-->>Browser: 200 OK (Render markdown_preview.html)
-            else Target is .csv file
+            alt Target is .csv file (regardless of detected MIME)
                 Flask->>Flask: Ensure scan index exists (.csv-index/<sha256>)
                 Flask-->>Browser: 200 OK (Render csv_preview.html)
                 Browser->>Flask: GET /csv/<link><ext>?rb=0&cb=0 (tiles)
                 Flask-->>Browser: 200 OK (JSON tile data)
-            else Target is download-only MIME (HTML, SVG, XML, JavaScript)
+            else Target is download-only MIME or extension (HTML, SVG, XML, JavaScript)
                 Flask-->>Browser: 200 OK (octet-stream attachment + CSP sandbox)
+            else Target is .md file
+                Flask->>Flask: Parse Markdown, sanitize with Bleach, inject Mermaid wrappers
+                Flask-->>Browser: 200 OK (Render markdown_preview.html)
             else Target is video/* MIME
                 Flask-->>Browser: 200 OK (Render video_preview.html with HTML5 player)
                 Browser->>Flask: GET /download/<link><ext> (video stream)
@@ -271,9 +271,9 @@ erDiagram
 ### 5.1 Controls
 1. HMAC-SHA256 link derivation. Public URLs cannot be predicted or listed offline without `FHOST_LINK_SECRET`.
 2. MIME detection. `python-magic` (`libmagic`) reads bytes from the file. A spoofed HTTP `Content-Type` is ignored.
-3. Upload vs preview vs download. Windows executables and Java class/archive files are rejected (MIME and `.exe`/`.jar`/`.class` names). HTML, SVG, XML, and JavaScript are stored and returned as `application/octet-stream` attachments with `nosniff` and a restrictive CSP. Raster images preview from `/raw/` (`Content-Disposition: inline`); PDFs are served inline at their own URL so the browser's native viewer (an isolated origin with its own download button) handles display. Preview pages use relative URLs so media loads over whatever scheme served the page. This does not scan for malware.
+3. Upload vs preview vs download. Detected Windows executables and Java class/archive files, plus `.exe`/`.jar`/`.class` names, are rejected. JARs detected as ZIP may be accepted under another filename; archive entries are not inspected. HTML (including MHTML), SVG, XML, and JavaScript (including `.mjs`/`.cjs`) download as `application/octet-stream` attachments with `nosniff` and a restrictive CSP. CSV previews take precedence over detected MIME and display cells as text; their downloads still apply the MIME policy. Markdown with embedded HTML is sanitized, but an HTML document named `.md` stays download-only even with a leading BOM, whitespace, or HTML comments. Raster images preview from `/raw/` (`Content-Disposition: inline`); PDFs are served inline at their own URL using the browser's native viewer. Preview pages use relative URLs so media loads over whatever scheme served the page. This does not scan for malware.
 4. HTML sanitization. Markdown rendering uses `bleach` to allow tags such as `<p>`, `<h1>`-`<h6>`, `<code>`, `<pre>`, `<table>`, `<a>`, and `<img>`, and to strip scripts and other unsafe tags.
-5. Security headers. Every response includes `X-Content-Type-Options: nosniff`. Downloads use `Content-Disposition: attachment`.
+5. Security headers. Every response includes `X-Content-Type-Options: nosniff`. Downloads use `Content-Disposition: attachment`. Filename parameters escape quotes and backslashes, remove CR/LF, and use UTF-8 `filename*` with an ASCII fallback for non-ASCII names.
 6. Audit logging. `file_audit` records moderation and cleanup actions. It does not store uploader IP addresses, query parameters, or other personal data.
 7. Disabled features.
    Remote URL fetching (`url=` parameter) is off, which removes SSRF from that path.

@@ -9,7 +9,7 @@ This is the HTTP API for the 0x0-dockerized file host.
 - Direct file uploads via `multipart/form-data` POST.
 - Canonical URLs are 64-character hexadecimal HMAC-SHA256 digests. Without `FHOST_LINK_SECRET`, a guessed URL does not tell you whether a file exists.
 - Legacy 12-character tokens return HTTP 301 to the canonical HMAC URL.
-- Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), and plain text (`text/*`).
+- Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), raster images, PDFs, and plain text (`text/*`).
 - `/download/` keeps the original filename.
 - `/raw/` serves raster image bytes inline for the `<img>` preview tag.
 - Identical bytes, extension, and filename reuse the existing link and refresh retention.
@@ -128,9 +128,9 @@ flowchart TD
     MATCH_LINK -- "Missing storage" --> E404
     MATCH_LINK -- "Valid" --> ROUTE{"File Type Check"}
 
-    ROUTE -- "HTML / SVG / XML / JS" --> DLONLY["Opaque octet-stream attachment\n(CSP sandbox, never live render)"]
-    ROUTE -- ".md extension" --> MD["Render Markdown Preview\n(HTML + Mermaid.js + Download Link)"]
-    ROUTE -- ".csv extension" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
+    ROUTE -- ".csv extension (first)" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
+    ROUTE -- "Download-only MIME or extension" --> DLONLY["Opaque octet-stream attachment\n(CSP sandbox, never live render)"]
+    ROUTE -- ".md, not download-only" --> MD["Render Markdown Preview\n(HTML + Mermaid.js + Download Link)"]
     ROUTE -- "video/* MIME" --> VID["Render Video Player Preview\n(HTML5 <video> + Download Link)"]
     ROUTE -- "raster image/*" --> IMG["Render Image Preview\n(<img> + /raw/ inline bytes)"]
     ROUTE -- "application/pdf" --> PDF["Serve PDF Inline\n(native viewer + its download button)"]
@@ -146,13 +146,14 @@ flowchart TD
 
 2. Markdown preview (`.md` files).
    Renders HTML from Markdown (headings, lists, blockquotes, code blocks, tables).
+   Markdown with embedded HTML still gets a sanitized preview. HTML documents named `.md` stay download-only: the upload check skips a UTF-8 BOM, whitespace, and leading HTML comments, then checks for `<!doctype`, `<html`, `<?xml`, or `<script`.
    `bleach` strips HTML tags and attributes that are not on the allow list, which blocks XSS.
    Mermaid diagrams in ` ```mermaid ` blocks are drawn in the browser.
    A Download link at the top points to `/download/<link><extension>`.
    Sets `X-Content-Type-Options: nosniff`.
 
 3. CSV table preview (`.csv` files).
-   Renders `csv_preview.html`.
+   Renders `csv_preview.html`, even if libmagic detects HTML in a cell. This extension-based preview runs before the download-only check; cells are displayed as text, not live HTML. Downloads still apply the download-only MIME policy.
    The grid paints only visible cells.
    Row numbers and column letters (`A`, `B`, … `AA`, and so on) are generated.
    Toolbar Row and Column boxes jump to coordinates.
@@ -184,9 +185,9 @@ flowchart TD
    Renders HTML with a Download link and HTML-escaped text inside `<pre>`.
    Sets `X-Content-Type-Options: nosniff`.
 
-8. Download-only active web content (HTML, XHTML, SVG, XML, JavaScript).
-   Returns the original bytes as `application/octet-stream` with `Content-Disposition: attachment` and `Content-Security-Policy: sandbox; default-src 'none'; ...`.
-   `/raw/` returns `404` for these files.
+8. Download-only active web content (HTML, XHTML, MHTML, SVG, XML, JavaScript).
+   Returns the original bytes as `application/octet-stream` with `Content-Disposition: attachment` and `Content-Security-Policy: sandbox; default-src 'none'; base-uri 'none'; form-action 'none'`.
+   `/raw/` returns `404` for these files. CSV files use the safe table preview described above; `/download/` still returns opaque bytes.
 
 9. Other binaries (for example `.zip`, `.tar.gz`).
    Returns the bytes with `Content-Disposition: attachment; filename="<original_filename>"`.
@@ -226,9 +227,10 @@ Download any file as an attachment, skipping HTML preview pages, and keep the or
 #### Response headers
 | Header | Value | Description |
 |---|---|---|
-| `Content-Type` | MIME type (for example `video/mp4`, `text/csv`, `text/markdown`) | MIME type of stored content. |
-| `Content-Disposition` | `attachment; filename="<original_filename>"` | Forces a download with the original filename. |
+| `Content-Type` | Stored MIME, or `application/octet-stream` | Download-only MIME types and extensions always use `application/octet-stream` on this endpoint. |
+| `Content-Disposition` | `attachment; filename="<original_filename>"` | Forces a download. Quotes and backslashes are escaped; non-ASCII names also have a UTF-8 `filename*` parameter and an ASCII fallback. |
 | `X-Content-Type-Options` | `nosniff` | Stops the browser from MIME sniffing. |
+| `Content-Security-Policy` | `sandbox; default-src 'none'; base-uri 'none'; form-action 'none'` | Set for download-only content. |
 | `Accept-Ranges` | `bytes` | Allows byte-range seeking for media. |
 
 #### Example
@@ -341,9 +343,9 @@ These are rejected with HTTP 415:
 - `application/java-vm` / `application/x-java-applet` (`.class`)
 - Filenames ending in `.exe`, `.jar`, or `.class` (JARs are often detected as ZIP)
 
-`python-magic` (`libmagic`) reads MIME type from the raw bytes, so renaming an EXE to `.txt` does not bypass the check. The 415 body names the detected type. This is not antivirus scanning.
+`python-magic` (`libmagic`) reads MIME type from the raw bytes, so renaming an EXE to `.txt` does not bypass the check. The 415 body names the detected type. JARs detected as ordinary ZIP archives can be accepted without a `.jar` filename; archive entries are not inspected. This is not antivirus scanning.
 
-### Download-only types (`FHOST_DOWNLOAD_ONLY_MIMES`)
+### Download-only types (`FHOST_DOWNLOAD_ONLY_MIMES` and `FHOST_DOWNLOAD_ONLY_EXTS`)
 These are stored and returned as opaque attachments (`application/octet-stream`, `nosniff`, CSP `sandbox`):
 
 - `text/html`, `application/xhtml+xml`
@@ -351,8 +353,8 @@ These are stored and returned as opaque attachments (`application/octet-stream`,
 - `application/xml`, `text/xml`
 - `application/javascript`, `text/javascript`, `application/ecmascript`, `application/x-javascript`
 
-They are never rendered as live pages. `/raw/` does not serve them.
-Filename extensions `.html`, `.htm`, `.svg`, `.xml`, `.js`, and `.xhtml` are also download-only, so a `.js` file libmagic labels `text/plain` is not shown as a text preview.
+They are never rendered as live pages. `/raw/` does not serve them. CSV cells and embedded HTML in Markdown may appear in safe previews, as described above.
+Filename extensions `.html`, `.htm`, `.svg`, `.xml`, `.js`, `.xhtml`, `.mhtml`, `.mht`, `.mjs`, and `.cjs` are also download-only, so JavaScript or MHTML that libmagic labels `text/plain` is not shown as a text preview.
 
 ---
 

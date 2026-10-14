@@ -26,8 +26,8 @@ A self-hosted file host based on [0x0 / The Null Pointer](https://0x0.st). It ru
 - Security:
   - `FHOST_LINK_SECRET` is required outside test mode.
   - Re-upload of moderated content returns `451 Unavailable For Legal Reasons`.
-  - Windows executables, Java archives, and Java class files return `415 Unsupported Media Type`.
-  - HTML, SVG, XML, and JavaScript are stored as opaque downloads (`application/octet-stream`); they are not rendered as live pages.
+  - Detected Windows executables and Java class/archive files, plus `.exe`/`.jar`/`.class` filenames, return `415 Unsupported Media Type`. A JAR detected as ZIP can be accepted if renamed; archive entries are not inspected.
+  - HTML (including MHTML), SVG, XML, and JavaScript (including `.mjs`/`.cjs`) download as opaque attachments (`application/octet-stream`); they are not rendered as live pages. CSV cells and embedded HTML in Markdown are shown only through their safe previews.
   - Remote URL import and generic URL shortening are off.
   - Responses include `X-Content-Type-Options: nosniff`.
   - The app runs as user `app` (UID/GID 1000).
@@ -89,14 +89,14 @@ curl -F'file=@document.md;filename=architecture-spec.md' https://your-domain.exa
 
 ### Retrieving and downloading files
 - View / preview: `GET /<link><ext>` (for example `https://your-domain.example/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
-  - `.md` files render a Markdown preview with Mermaid diagrams and a Download link.
-  - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link.
+  - `.md` files render a sanitized Markdown preview with Mermaid diagrams and a Download link. HTML documents named `.md` stay download-only.
+  - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link, even when libmagic detects HTML in a cell.
   - `video/*` files render an HTML5 video preview.
   - Raster images render an `<img>` preview (SVG stays download-only).
   - PDFs open directly in the browser's built-in PDF viewer (inline bytes, viewer supplies its own download button).
   - `text/*` files render a plain text preview.
   - Other binaries download as attachments.
-- Inline media: `GET /raw/<link><ext>` returns image bytes with `Content-Disposition: inline` for the `<img>` preview tag. PDFs are served inline at their own URL instead. HTML/SVG/XML are not served here.
+- Inline media: `GET /raw/<link><ext>` returns image bytes with `Content-Disposition: inline` for the `<img>` preview tag. PDFs are served inline at their own URL instead. HTML/SVG/XML/JavaScript are not served here.
   - Legacy URLs (`GET /<token><ext>`) return `301 Moved Permanently` to the canonical link.
 - Forced download: `GET /download/<link><ext>` (for example `https://your-domain.example/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
   - Skips preview pages and sends the file with the original filename in `Content-Disposition`.

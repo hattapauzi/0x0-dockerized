@@ -48,7 +48,7 @@ cd 0x0
 ~/.venvs/0x0/bin/python -m pytest tests/ -q
 ```
 
-All 75 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, image/PDF preview, download-only HTML/SVG/XML/JS, and retention pruning should pass.
+All tests should pass. They cover uploads, HMAC derivation, CSV indexing and virtualization (including HTML-like cells), sanitized Markdown and disguised HTML, video, image/PDF preview, download-only HTML/SVG/XML/JS and MHTML, filename header escaping, and retention pruning. Download-only headers and filename encoding are checked with and without X-Accel-Redirect; these tests do not exercise a live Nginx deployment.
 
 ### Run specific tests
 ```bash
