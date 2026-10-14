@@ -1,6 +1,17 @@
 import os
 
-SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URI")
+_db_uri = os.getenv("DATABASE_URI")
+if _db_uri and _db_uri.startswith("postgresql://"):
+    try:
+        import psycopg
+    except ImportError:
+        try:
+            import psycopg2
+            _db_uri = _db_uri.replace("postgresql://", "postgresql+psycopg2://", 1)
+        except ImportError:
+            pass
+
+SQLALCHEMY_DATABASE_URI = _db_uri
 
 if os.getenv("MAX_SIZE"):
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_SIZE")) * 1024 * 1024
