@@ -16,6 +16,8 @@ SQLALCHEMY_DATABASE_URI = _db_uri
 if os.getenv("MAX_SIZE"):
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_SIZE")) * 1024 * 1024
 
+FHOST_LINK_SECRET = os.getenv("FHOST_LINK_SECRET")
+
 # Force HTTPS for generated URLs
 PREFERRED_URL_SCHEME = "https"
 

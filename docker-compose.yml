@@ -7,6 +7,7 @@ services:
       DATABASE_URI: "${DATABASE_URI}"
       FLASK_APP: fhost
       MAX_SIZE: "${MAX_SIZE_MB:-512}"
+      FHOST_LINK_SECRET: "${FHOST_LINK_SECRET}"
     volumes:
       - ./data/up:/app/up
     ports:
@@ -41,6 +42,7 @@ services:
       DATABASE_URI: "${DATABASE_URI}"
       FLASK_APP: fhost
       MAX_SIZE: "${MAX_SIZE_MB:-512}"
+      FHOST_LINK_SECRET: "${FHOST_LINK_SECRET}"
     command: ["python", "cleanup.py"]
     volumes:
       - ./data/up:/app/up

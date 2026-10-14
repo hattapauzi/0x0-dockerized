@@ -16,6 +16,7 @@ url_for = None
 File = None
 URL = None
 TOKEN_RE = re.compile(r"^https://localhost/[A-Za-z0-9_-]{12}(?:\.[A-Za-z0-9._-]+)?\n$")
+LINK_RE = re.compile(r"^https://localhost/[0-9a-f]{64}(?:\.[A-Za-z0-9._-]+)?\n$")
 
 
 def get_uploaded_path(response):
@@ -39,6 +40,7 @@ def client():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["DATABASE_URI"] = f"sqlite:///{tmpdir}/db.sqlite"
+        os.environ["FHOST_LINK_SECRET"] = "test-secret-value-32-chars-long"
 
         if "fhost" in sys.modules:
             fhost = importlib.reload(sys.modules["fhost"])
@@ -59,6 +61,46 @@ def client():
                 db_upgrade()
             yield client
 
+
+def test_missing_link_secret_raises_outside_testing():
+    old_secret = os.environ.get("FHOST_LINK_SECRET")
+    old_uri = os.environ.get("DATABASE_URI")
+    try:
+        if "FHOST_LINK_SECRET" in os.environ:
+            del os.environ["FHOST_LINK_SECRET"]
+        os.environ["DATABASE_URI"] = "sqlite:///:memory:"
+        if "fhost" in sys.modules:
+            sys.modules["fhost"].app.config["TESTING"] = False
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required"):
+                importlib.reload(sys.modules["fhost"])
+        else:
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required"):
+                importlib.import_module("fhost")
+    finally:
+        if old_secret is not None:
+            os.environ["FHOST_LINK_SECRET"] = old_secret
+        if old_uri is not None:
+            os.environ["DATABASE_URI"] = old_uri
+        if "fhost" in sys.modules:
+            sys.modules["fhost"].app.config["TESTING"] = True
+
+
+def test_models_have_link_and_file_audit(client):
+    import fhost
+    File = fhost.File
+    FileAudit = fhost.FileAudit
+    assert hasattr(File, "link")
+    assert File.token.property.columns[0].nullable is True
+    assert FileAudit.__tablename__ == "file_audit"
+
+    with app.app_context():
+        audit = FileAudit(sha256="test-sha", link="test-link", action="TEST_ACTION")
+        db.session.add(audit)
+        db.session.commit()
+        assert audit.id is not None
+        assert audit.created_at is not None
+
+
 def test_client(client):
     payloads = [
         ({ "file" : (BytesIO(b"hello"), "hello.txt") }, 200),
@@ -78,7 +120,7 @@ def test_client(client):
         assert rv.status_code == s
         if rv.status_code == 200:
             location = rv.data.decode()
-            assert TOKEN_RE.match(location)
+            assert LINK_RE.match(location)
             paths.append(location.removeprefix("https://localhost/").strip())
 
     assert paths[0] != paths[1]
@@ -256,6 +298,166 @@ def test_randomized_links_preserve_uploaded_filename_on_download(client):
     assert second_download.headers["Content-Disposition"] == 'attachment; filename="second name.txt"'
 
 
+def test_uploaded_file_urls_use_64_hex_hmac(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"hmac-content"), "sample.txt")},
+    )
+    assert rv.status_code == 200
+    assert LINK_RE.match(rv.data.decode())
+
+
+def test_upload_deduplication_same_bytes_and_name(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"identical-bytes"), "same.txt")},
+    )
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"identical-bytes"), "same.txt")},
+    )
+    assert rv1.data == rv2.data
+    link_val = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        assert File.query.filter_by(link=link_val).count() == 1
+
+
+def test_upload_different_filename_different_link(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes-diff-name"), "first.txt")},
+    )
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes-diff-name"), "second.txt")},
+    )
+    assert rv1.data != rv2.data
+
+
+def test_reupload_of_removed_file_returns_451(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"moderated-bytes"), "bad.txt")},
+    )
+    link_val = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.removed = True
+        db.session.commit()
+
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"moderated-bytes"), "bad.txt")},
+    )
+    assert rv2.status_code == 451
+
+
+def test_canonical_link_returns_200_without_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"test-content"), "canon.txt")},
+    )
+    path = get_uploaded_path(rv)
+    resp = client.get(path)
+    assert resp.status_code == 200
+
+
+def test_legacy_token_301_redirects_to_canonical_link(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-content"), "leg.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "1234567890ab"
+        db.session.commit()
+        token = f.token
+        link = f.link
+
+    resp = client.get(f"/{token}.txt?foo=bar")
+    assert resp.status_code == 301
+    assert resp.headers["Location"].endswith(f"/{link}.txt?foo=bar")
+
+    dl_resp = client.get(f"/download/{token}.txt")
+    assert dl_resp.status_code == 301
+    assert dl_resp.headers["Location"].endswith(f"/download/{link}.txt")
+
+
+def test_legacy_token_removed_returns_451_before_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-removed"), "bad.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "legacyrem001"
+        f.removed = True
+        db.session.commit()
+
+    resp = client.get("/legacyrem001.txt")
+    assert resp.status_code == 451
+    assert "Location" not in resp.headers
+
+
+def test_legacy_token_missing_storage_returns_404_before_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-missing"), "gone.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "legacymiss01"
+        db.session.commit()
+        storage_file = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+        if storage_file.exists():
+            storage_file.unlink()
+
+    resp = client.get("/legacymiss01.txt")
+    assert resp.status_code == 404
+    assert "Location" not in resp.headers
+
+
+def test_multiple_legacy_duplicates_451_if_any_removed(client):
+    from fhost import make_link
+    with app.app_context():
+        link_shared = make_link("dup-sha", ".txt", "dup.txt")
+        f1 = File("dup-sha", "token1111111", ".txt", "text/plain", "127.0.0.1", "dup.txt", link=link_shared)
+        f2 = File("dup-sha", "token2222222", ".txt", "text/plain", "127.0.0.1", "dup.txt", link=link_shared)
+        f2.removed = True
+        storage_file = Path(app.config["FHOST_STORAGE_PATH"]) / "dup-sha"
+        storage_file.write_bytes(b"content")
+        db.session.add_all([f1, f2])
+        db.session.commit()
+
+    resp = client.get(f"/{link_shared}.txt")
+    assert resp.status_code == 451
+
+
 def test_uploaded_file_urls_use_long_random_tokens(client):
     rv = client.post(
         "/",
@@ -265,7 +467,7 @@ def test_uploaded_file_urls_use_long_random_tokens(client):
     )
 
     assert rv.status_code == 200
-    assert TOKEN_RE.match(rv.data.decode())
+    assert LINK_RE.match(rv.data.decode())
 
 
 def test_dotted_filenames_keep_real_file_extension_in_public_url(client):
@@ -301,8 +503,8 @@ def test_dotted_filenames_keep_real_file_extension_in_public_url(client):
     assert not pdf_path.endswith(".my_fpx-r")
     assert video_path.endswith(".mp4")
     assert not video_path.endswith("._created")
-    assert TOKEN_RE.match(pdf.data.decode())
-    assert TOKEN_RE.match(video.data.decode())
+    assert LINK_RE.match(pdf.data.decode())
+    assert LINK_RE.match(video.data.decode())
 
     pdf_download = client.get(f"/download/{pdf_path}")
     video_download = client.get(f"/download/{video_path}")
@@ -342,7 +544,7 @@ def test_markdown_upload_returns_md_url(client):
 
     assert rv.status_code == 200
     assert get_uploaded_path(rv).endswith(".md")
-    assert TOKEN_RE.match(rv.data.decode())
+    assert LINK_RE.match(rv.data.decode())
 
 
 def test_markdown_preview_renders_common_markdown(client):
@@ -1072,8 +1274,8 @@ def test_csv_data_rejects_non_csv_and_removed(client):
         data={"file": (BytesIO(b"a\n"), "gone.csv")},
     )
     path = get_uploaded_path(rv)
-    token = path[:-4]
-    f = File.query.filter_by(token=token).first()
+    link = path[:-4]
+    f = File.query.filter_by(link=link).first()
     f.removed = True
     db.session.commit()
     assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 451
@@ -1126,5 +1328,144 @@ def test_cleanup_keeps_index_for_live_csv_and_drops_it_after_expiry(client):
     cleanup_mod.cleanup_expired(str(storage), app.config["MAX_CONTENT_LENGTH"])
     assert not (storage / sha).exists()
     assert not index.exists()
+
+
+def test_prune_rows_deletes_expired_active_records_and_logs_audit(client):
+    import cleanup as cleanup_mod
+    from fhost import FileAudit
+
+    # 1. Active file that has expired (file deleted on disk)
+    rv1 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"active-expired"), "f1.txt")})
+    link1 = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f1 = File.query.filter_by(link=link1).first()
+        sha1 = f1.sha256
+    storage_file1 = Path(app.config["FHOST_STORAGE_PATH"]) / sha1
+    storage_file1.unlink()
+
+    # 2. Active file that has NOT expired (file exists on disk)
+    rv2 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"active-not-expired"), "f2.txt")})
+    link2 = rv2.data.decode().removeprefix("https://localhost/").split(".")[0]
+
+    # 3. Moderated file that has expired (file deleted on disk) with IP set
+    rv3 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"moderated-expired"), "f3.txt")})
+    link3 = rv3.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f3 = File.query.filter_by(link=link3).first()
+        f3.removed = True
+        f3.addr = "192.168.1.100"
+        sha3 = f3.sha256
+        db.session.commit()
+    storage_file3 = Path(app.config["FHOST_STORAGE_PATH"]) / sha3
+    storage_file3.unlink()
+
+    cleanup_mod.prune_rows(app.config["FHOST_STORAGE_PATH"])
+
+    with app.app_context():
+        # Verify f1 (active expired) was deleted
+        assert File.query.filter_by(link=link1).first() is None
+        audit1 = FileAudit.query.filter_by(sha256=sha1, action="PRUNED_EXPIRED").first()
+        assert audit1 is not None
+        assert audit1.link == link1
+
+        # Verify f2 (active not expired) was kept
+        assert File.query.filter_by(link=link2).first() is not None
+
+        # Verify f3 (moderated expired) was kept but addr scrubbed to None
+        f3_post = File.query.filter_by(link=link3).first()
+        assert f3_post is not None
+        assert f3_post.addr is None
+        audit3 = FileAudit.query.filter_by(sha256=sha3, action="MODERATED_ADDR_SCRUBBED").first()
+        assert audit3 is not None
+
+        # Verify zero PII in audit table
+        assert not hasattr(FileAudit, "addr")
+
+
+def test_store_mixed_legacy_duplicates_451_not_bypassed(client):
+    content = b"mixed-legacy-duplicate-content"
+    # Seed active row (id=1) and removed row (id=2) with the exact same link and name
+    rv1 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(content), "mixed.txt")})
+    assert rv1.status_code == 200
+    link = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+
+    with app.app_context():
+        # First row is active
+        f1 = File.query.filter_by(link=link).first()
+        assert f1.removed is False
+
+        # Add second legacy row with different token, same link, but removed=True
+        f2 = File(
+            sha256=f1.sha256,
+            token="leg_tok_mixed",
+            ext=".txt",
+            mime="text/plain",
+            addr="10.0.0.99",
+            original_name="mixed.txt",
+            link=link
+        )
+        f2.removed = True
+        db.session.add(f2)
+        db.session.commit()
+
+    # Attempt re-upload of the file. It must abort with 451, not return 200!
+    rv_reupload = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(content), "mixed.txt")})
+    assert rv_reupload.status_code == 451
+
+
+def test_token_model_unique_flag():
+    # Verify model token column has unique=True to match migrated database uq_file_token
+    assert File.token.property.columns[0].unique is True
+
+
+def test_legacy_redirect_respects_preferred_url_scheme(client):
+    orig = app.config.get("PREFERRED_URL_SCHEME")
+    try:
+        app.config["PREFERRED_URL_SCHEME"] = "http"
+        # Seed file
+        rv = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"scheme-test"), "scheme.txt")})
+        canonical_link = rv.data.decode().removeprefix("http://localhost/").split(".")[0]
+
+        with app.app_context():
+            f = File.query.filter_by(link=canonical_link).first()
+            f.token = "tok_scheme01"
+            db.session.commit()
+
+        res = client.get("/tok_scheme01.txt?foo=bar")
+        assert res.status_code == 301
+        assert res.headers["Location"].startswith("http://localhost/")
+        assert res.headers["Location"].endswith(f"/{canonical_link}.txt?foo=bar")
+    finally:
+        app.config["PREFERRED_URL_SCHEME"] = orig
+
+
+def test_migration_fail_closed_without_secret():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "migration_b2c",
+        Path(__file__).parent.parent / "migrations/versions/b2c3d4e5f6a7_hmac_links_and_audit.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # In non-testing context with no secret, upgrade() must raise RuntimeError
+    orig_secret = app.config.get("FHOST_LINK_SECRET")
+    orig_env = os.environ.get("FHOST_LINK_SECRET")
+    orig_testing = app.config.get("TESTING")
+    try:
+        app.config["FHOST_LINK_SECRET"] = None
+        app.config["TESTING"] = False
+        if "FHOST_LINK_SECRET" in os.environ:
+            del os.environ["FHOST_LINK_SECRET"]
+
+        with app.app_context():
+            with pytest.raises(RuntimeError, match="FHOST_LINK_SECRET is required to backfill links"):
+                mod.upgrade()
+    finally:
+        app.config["FHOST_LINK_SECRET"] = orig_secret
+        if orig_env is not None:
+            os.environ["FHOST_LINK_SECRET"] = orig_env
+        app.config["TESTING"] = orig_testing
+
 
 

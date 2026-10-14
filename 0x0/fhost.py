@@ -19,9 +19,10 @@
     and limitations under the License.
 """
 
-from flask import Flask, abort, make_response, redirect, request, send_from_directory, url_for, Response, render_template
+from flask import Flask, abort, has_request_context, make_response, redirect, request, send_from_directory, url_for, Response, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from sqlalchemy.exc import IntegrityError
 from jinja2.exceptions import *
 from jinja2 import ChoiceLoader, FileSystemLoader
 from markupsafe import Markup
@@ -31,11 +32,11 @@ from mimetypes import guess_extension
 import bleach
 import csv
 import fcntl
+import hmac
 import json
 import markdown
 import os
 import re
-import secrets
 import struct
 import sys
 import threading
@@ -76,12 +77,14 @@ app.config.update(
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
     NSFW_THRESHOLD = 0.608,
-    FHOST_TOKEN_LENGTH = 12,
     URL_ALPHABET = "DEQhd2uFteibPwq0SWBInTpA_jcZL5GKz3YCR14Ulk87Jors9vNHgfaOmMXy6Vx-",
+    FHOST_LINK_SECRET = None,
 )
 
 if not app.config["TESTING"]:
     app.config.from_pyfile("config.py")
+    if not app.config.get("FHOST_LINK_SECRET"):
+        raise RuntimeError("FHOST_LINK_SECRET is required outside testing mode")
     app.jinja_loader = ChoiceLoader([
         FileSystemLoader(str(Path(app.instance_path) / "templates")),
         app.jinja_loader
@@ -127,10 +130,27 @@ class URL(db.Model):
 
         return u
 
+def make_link(sha256_val, ext_val, original_name_val, secret=None):
+    if secret is None:
+        secret = app.config.get("FHOST_LINK_SECRET") or b"test-secret"
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    msg = "\0".join([sha256_val or "", ext_val or "", original_name_val or ""])
+    return hmac.new(secret, msg.encode("utf-8"), "sha256").hexdigest()
+
+class FileAudit(db.Model):
+    __tablename__ = "file_audit"
+    id = db.Column(db.Integer, primary_key=True)
+    sha256 = db.Column(db.String, nullable=False, index=True)
+    link = db.Column(db.String(64), nullable=True, index=True)
+    action = db.Column(db.String(32), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
 class File(db.Model):
     id = db.Column(db.Integer, primary_key = True)
-    sha256 = db.Column(db.String)
-    token = db.Column(db.String(32), unique = True, nullable = False)
+    sha256 = db.Column(db.String, index = True)
+    token = db.Column(db.String(32), unique = True, nullable = True)
+    link = db.Column(db.String(64), nullable = False)
     ext = db.Column(db.UnicodeText)
     mime = db.Column(db.UnicodeText)
     addr = db.Column(db.UnicodeText)
@@ -138,42 +158,33 @@ class File(db.Model):
     nsfw_score = db.Column(db.Float)
     original_name = db.Column(db.UnicodeText)
 
-    def __init__(self, sha256, token, ext, mime, addr, original_name=None):
+    def __init__(self, sha256, token, ext, mime, addr, original_name=None, link=None):
         self.sha256 = sha256
         self.token = token
         self.ext = ext
         self.mime = mime
         self.addr = addr
         self.original_name = original_name
+        self.link = link or make_link(sha256, ext, original_name)
 
     def getname(self):
-        return u"{0}{1}".format(self.token, self.ext)
+        return u"{0}{1}".format(self.link, self.ext)
 
     def getdownloadname(self):
         return self.original_name or self.getname()
 
     def geturl(self):
         n = self.getname()
+        scheme = app.config.get("PREFERRED_URL_SCHEME") or (request.scheme if has_request_context() else "https")
 
         if self.nsfw_score and self.nsfw_score > app.config["NSFW_THRESHOLD"]:
-            return url_for("get", path=n, _external=True, _scheme="https", _anchor="nsfw") + "\n"
+            return url_for("get", path=n, _external=True, _scheme=scheme, _anchor="nsfw") + "\n"
         else:
-            return url_for("get", path=n, _external=True, _scheme="https") + "\n"
+            return url_for("get", path=n, _external=True, _scheme=scheme) + "\n"
 
     def store(file_, addr):
         data = file_.stream.read()
         digest = sha256(data).hexdigest()
-
-        def generate_token():
-            alphabet = app.config["URL_ALPHABET"]
-            length = app.config["FHOST_TOKEN_LENGTH"]
-            return "".join(secrets.choice(alphabet) for _ in range(length))
-
-        def get_unique_token():
-            while True:
-                token = generate_token()
-                if not File.query.filter_by(token=token).first():
-                    return token
 
         def get_mime():
             guess = mimedetect.from_buffer(data)
@@ -230,13 +241,25 @@ class File(db.Model):
         mime = get_mime()
         ext = get_ext(mime)
         original_name = get_original_name(ext)
-        f = File(digest, get_unique_token(), ext, mime, addr, original_name=original_name)
-
-        f.addr = addr
+        link = make_link(digest, ext, original_name)
 
         storage = Path(app.config["FHOST_STORAGE_PATH"])
         storage.mkdir(parents=True, exist_ok=True)
         p = storage / digest
+
+        if File.query.filter_by(link=link, removed=True).first():
+            abort(451)
+
+        existing = File.query.filter_by(link=link, removed=False).first()
+        if existing:
+            if not p.is_file():
+                file_.stream.seek(0)
+                file_.save(p)
+            else:
+                p.touch()
+            return existing
+
+        f = File(digest, None, ext, mime, addr, original_name=original_name, link=link)
 
         if not p.is_file():
             file_.stream.seek(0)
@@ -247,9 +270,18 @@ class File(db.Model):
         if not f.nsfw_score and app.config["NSFW_DETECT"]:
             f.nsfw_score = nsfw.detect(p)
 
-        db.session.add(f)
-        db.session.commit()
-        return f
+        try:
+            db.session.add(f)
+            db.session.commit()
+            return f
+        except IntegrityError:
+            db.session.rollback()
+            if File.query.filter_by(link=link, removed=True).first():
+                abort(451)
+            existing = File.query.filter_by(link=link, removed=False).first()
+            if existing:
+                return existing
+            raise
 
 
 
@@ -624,37 +656,67 @@ def build_csv_preview_response(f, fpath):
     return response
 
 
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
 def lookup_file(path):
-    path = Path(path.split("/", 1)[0])
-    sufs = "".join(path.suffixes[-2:])
-    name = path.name[:-len(sufs) or None]
+    parts = path.split("/", 1)
+    file_part = Path(parts[0])
+    extra = parts[1] if len(parts) > 1 else None
+    sufs = "".join(file_part.suffixes[-2:])
+    name = file_part.name[:-len(sufs) or None]
 
-    if sufs:
-        f = File.query.filter_by(token=name).first()
+    if not sufs or not name:
+        abort(404)
 
-        if f and f.ext == sufs:
-            if f.removed:
-                abort(451)
+    is_legacy = False
+    if HEX64_RE.match(name):
+        rows = File.query.filter_by(link=name, ext=sufs).all()
+        if not rows:
+            abort(404)
+        if any(r.removed for r in rows):
+            abort(451)
+        f = rows[0]
+    else:
+        # ponytail: legacy token links. Remove when
+        #   SELECT count(*) FROM file WHERE token IS NOT NULL;  -> 0
+        # then: migration dropping file.token and recreating uq_file_link without WHERE.
+        f = File.query.filter_by(token=name, ext=sufs).first()
+        if not f:
+            abort(404)
+        if f.removed:
+            abort(451)
+        if f.link and File.query.filter_by(link=f.link, removed=True).first():
+            abort(451)
+        is_legacy = True
 
-            fpath = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+    fpath = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+    if not fpath.is_file():
+        abort(404)
 
-            if not fpath.is_file():
-                abort(404)
+    return f, fpath, is_legacy, extra
 
-            return f, fpath
 
-    abort(404)
+def _make_legacy_redirect(endpoint, f, extra=None):
+    qs = f"?{request.query_string.decode('utf-8')}" if request.query_string else ""
+    target_path = f.getname() if not extra else f"{f.getname()}/{extra}"
+    scheme = app.config.get("PREFERRED_URL_SCHEME") or request.scheme or "https"
+    target = url_for(endpoint, path=target_path, _external=True, _scheme=scheme) + qs
+    return redirect(target, code=301)
 
 
 @app.route("/download/<path:path>")
 def download(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("download", f, extra)
     return build_file_response(f, fpath)
 
 
 @app.route("/csv/<path:path>")
 def csv_data(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("csv_data", f, extra)
     if not should_render_csv(f):
         abort(404)
     try:
@@ -703,7 +765,9 @@ def csv_data(path):
 
 @app.route("/<path:path>")
 def get(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("get", f, extra)
 
     if should_render_markdown(f):
         return build_markdown_preview_response(f, fpath)
