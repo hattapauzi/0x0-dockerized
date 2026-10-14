@@ -169,7 +169,7 @@ class File(db.Model):
         self.link = link or make_link(sha256, ext, original_name)
 
     def getname(self):
-        return u"{0}{1}".format(self.token, self.ext)
+        return u"{0}{1}".format(self.link, self.ext)
 
     def getdownloadname(self):
         return self.original_name or self.getname()
@@ -185,17 +185,6 @@ class File(db.Model):
     def store(file_, addr):
         data = file_.stream.read()
         digest = sha256(data).hexdigest()
-
-        def generate_token():
-            alphabet = app.config["URL_ALPHABET"]
-            length = app.config["FHOST_TOKEN_LENGTH"]
-            return "".join(secrets.choice(alphabet) for _ in range(length))
-
-        def get_unique_token():
-            while True:
-                token = generate_token()
-                if not File.query.filter_by(token=token).first():
-                    return token
 
         def get_mime():
             guess = mimedetect.from_buffer(data)
@@ -252,13 +241,24 @@ class File(db.Model):
         mime = get_mime()
         ext = get_ext(mime)
         original_name = get_original_name(ext)
-        f = File(digest, get_unique_token(), ext, mime, addr, original_name=original_name)
-
-        f.addr = addr
+        link = make_link(digest, ext, original_name)
 
         storage = Path(app.config["FHOST_STORAGE_PATH"])
         storage.mkdir(parents=True, exist_ok=True)
         p = storage / digest
+
+        existing = File.query.filter_by(link=link).first()
+        if existing:
+            if existing.removed:
+                abort(451)
+            if not p.is_file():
+                file_.stream.seek(0)
+                file_.save(p)
+            else:
+                p.touch()
+            return existing
+
+        f = File(digest, None, ext, mime, addr, original_name=original_name, link=link)
 
         if not p.is_file():
             file_.stream.seek(0)
@@ -269,9 +269,18 @@ class File(db.Model):
         if not f.nsfw_score and app.config["NSFW_DETECT"]:
             f.nsfw_score = nsfw.detect(p)
 
-        db.session.add(f)
-        db.session.commit()
-        return f
+        try:
+            db.session.add(f)
+            db.session.commit()
+            return f
+        except Exception:
+            db.session.rollback()
+            existing = File.query.filter_by(link=link).first()
+            if existing:
+                if existing.removed:
+                    abort(451)
+                return existing
+            raise
 
 
 

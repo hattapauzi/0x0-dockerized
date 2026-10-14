@@ -16,6 +16,7 @@ url_for = None
 File = None
 URL = None
 TOKEN_RE = re.compile(r"^https://localhost/[A-Za-z0-9_-]{12}(?:\.[A-Za-z0-9._-]+)?\n$")
+LINK_RE = re.compile(r"^https://localhost/[0-9a-f]{64}(?:\.[A-Za-z0-9._-]+)?\n$")
 
 
 def get_uploaded_path(response):
@@ -295,6 +296,74 @@ def test_randomized_links_preserve_uploaded_filename_on_download(client):
 
     assert first_download.headers["Content-Disposition"] == 'attachment; filename="first-name.txt"'
     assert second_download.headers["Content-Disposition"] == 'attachment; filename="second name.txt"'
+
+
+def test_uploaded_file_urls_use_64_hex_hmac(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"hmac-content"), "sample.txt")},
+    )
+    assert rv.status_code == 200
+    assert LINK_RE.match(rv.data.decode())
+
+
+def test_upload_deduplication_same_bytes_and_name(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"identical-bytes"), "same.txt")},
+    )
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"identical-bytes"), "same.txt")},
+    )
+    assert rv1.data == rv2.data
+    link_val = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        assert File.query.filter_by(link=link_val).count() == 1
+
+
+def test_upload_different_filename_different_link(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes-diff-name"), "first.txt")},
+    )
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"same-bytes-diff-name"), "second.txt")},
+    )
+    assert rv1.data != rv2.data
+
+
+def test_reupload_of_removed_file_returns_451(client):
+    rv1 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"moderated-bytes"), "bad.txt")},
+    )
+    link_val = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.removed = True
+        db.session.commit()
+
+    rv2 = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"moderated-bytes"), "bad.txt")},
+    )
+    assert rv2.status_code == 451
 
 
 def test_uploaded_file_urls_use_long_random_tokens(client):
