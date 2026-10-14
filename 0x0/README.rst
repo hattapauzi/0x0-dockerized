@@ -1,45 +1,49 @@
-The Null Pointer (0x0 Application Package)
-===========================================
+The Null Pointer (0x0 application package)
+==========================================
 
-This directory contains the core Flask application package for 0x0-dockerized.
+This directory holds the Flask application for 0x0-dockerized.
 
-For the primary Docker-based deployment, architecture, and operational runbook, see the repository root `README.md` and the `docs/` directory.
+For Docker deployment, architecture, and operations, see the repository root ``README.md`` and the ``docs/`` directory.
 
-Features in this Package
-------------------------
+Features
+--------
 
-* **Direct Uploads & Retrieval:** Lightweight HTTP file host running under uWSGI / Flask.
-* **Deterministic HMAC-SHA256 Links:** Public canonical URLs use 64-character hexadecimal HMAC-SHA256 digests derived from a server secret, file hash, extension, and original filename. Legacy 12-character tokens return HTTP 301 redirects to canonical links.
-* **Preview Handlers:**
-  - Server-rendered Markdown preview (`.md`) with Bleach sanitization and Mermaid diagram rendering.
-  - Interactive virtualized CSV table preview (`.csv`) with on-disk block seeking (`.csv-index`), row/col jump boxes, and a paginated JSON tile/cell API (`GET /csv/`).
-  - Video playback preview (`video/*`) with native HTML5 player and HTTP byte range seeking support (`206 Partial Content`).
-  - Plain text preview (`text/*`).
-* **Original Filename Preservation:** Retains original filenames for attachment downloads via `/download/<link><ext>`.
-* **Content-Addressed Storage & Deduplication:** Storage deduplication by SHA-256 digest in `up/`. Duplicate uploads of the same file and filename reuse the canonical link and touch storage to refresh retention.
-* **Data Minimization:** Automated pruning of expired database records and address scrubbing on moderated rows, logged to a zero-PII `file_audit` table.
+* Runs as an HTTP file host under uWSGI / Flask.
+* Canonical public URLs are 64-character hexadecimal HMAC-SHA256 digests of a server secret, file hash, extension, and original filename. Legacy 12-character tokens return HTTP 301 to the canonical link.
+* Previews:
+
+  - Markdown (``.md``): Bleach sanitization and Mermaid diagrams.
+  - CSV (``.csv``): virtualized table, on-disk block seeking (``.csv-index``), row and column jump boxes, and a paginated JSON API at ``GET /csv/``.
+  - Video (``video/*``): HTML5 player and HTTP byte-range seeking (``206 Partial Content``).
+  - Plain text (``text/*``).
+
+* ``/download/<link><ext>`` keeps the original filename.
+* Payloads are stored by SHA-256 digest in ``up/``. The same file and filename reuse the canonical link and ``touch`` storage to refresh retention.
+* Expired database rows are deleted. Moderated rows have ``addr`` set to NULL. Events go to ``file_audit`` without IP addresses.
 
 Configuration
 -------------
 
-To change settings, modify `instance/config.py` or set environment variables:
-* ``FHOST_LINK_SECRET``: 32-byte hex secret key (e.g. via ``openssl rand -hex 32``). Strictly required outside testing mode.
-* ``DATABASE_URI``: SQLAlchemy database connection URI (supports ``postgresql://`` with automatic fallback to ``psycopg2``).
+Change settings in ``instance/config.py`` or with environment variables:
+
+* ``FHOST_LINK_SECRET``: 32-byte hex secret (for example ``openssl rand -hex 32``). Required outside testing.
+* ``DATABASE_URI``: SQLAlchemy database URI (``postgresql://`` falls back to ``psycopg2``).
 * ``MAX_SIZE``: Maximum upload size in megabytes.
 
-To customize the home and error pages, create a `templates` directory in your instance directory and copy any templates you want to modify there.
+To change the home and error pages, create a ``templates`` directory in your instance directory and copy the templates you want to edit.
 
-Retention & Cleanup
--------------------
-
-To expire files based on the dynamic retention curve and minimize database rows, run `python cleanup.py` periodically (or via the Docker Compose `cleanup` maintenance profile):
-1. **Disk Cleanup (``cleanup_expired``):** Deletes expired storage payloads from disk and cleans up orphan ``.csv-index`` scan files.
-2. **Database Minimization (``prune_rows``):** Prunes expired unmoderated database rows and scrubs uploader IP addresses on moderated records, logging non-PII events to ``file_audit``.
-
-Development & Testing
+Retention and cleanup
 ---------------------
 
-Local development virtual environment setup:
+To expire files on the retention curve and prune database rows, run ``python cleanup.py`` on a schedule (or use the Docker Compose ``cleanup`` profile):
+
+1. Disk cleanup (``cleanup_expired``): deletes expired storage payloads and leftover ``.csv-index`` files.
+2. Database minimization (``prune_rows``): deletes expired unmoderated rows and sets uploader IP addresses to NULL on moderated records. Events without IP addresses go to ``file_audit``.
+
+Development and testing
+-----------------------
+
+Local virtualenv:
 
 ::
 
@@ -49,10 +53,10 @@ Local development virtual environment setup:
     ~/.venvs/0x0/bin/pip install -r /tmp/reqs-0x0.txt
     ~/.venvs/0x0/bin/python -m playwright install chromium
 
-Run the test suite from inside this directory:
+Run tests from this directory:
 
 ::
 
     ~/.venvs/0x0/bin/python -m pytest tests/ -q
 
-For complete documentation, see `docs/development.md` and `docs/api.md` in the repository root.
+See ``docs/development.md`` and ``docs/api.md`` in the repository root.

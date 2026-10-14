@@ -1,39 +1,39 @@
-# 0x0-Dockerized Operations & Deployment Runbook
+# 0x0-dockerized operations runbook
 
-This runbook covers the operational procedures for deploying, maintaining, monitoring, backing up, and troubleshooting the `0x0-dockerized` service.
+Deploy, maintain, back up, and debug `0x0-dockerized`.
 
 ---
 
-## 1. Prerequisites & Environment
+## 1. Prerequisites and environment
 
-### System Requirements
+### System requirements
 - Linux host (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9+, or similar)
 - Docker Engine 24.0+ with Docker Compose v2.20+
-- Host Reverse Proxy (Nginx, Caddy, Traefik, or Cloudflare Tunnel) for TLS/HTTPS termination
-- Sufficient disk space under `./data/` for database and uploaded files
+- Host reverse proxy (Nginx, Caddy, Traefik, or Cloudflare Tunnel) for TLS
+- Disk space under `./data/` for the database and uploaded files
 
-### Access Requirements
-- SSH access with `sudo` or member of the `docker` group on the hosting server
-- Access to DNS records for configuring public domain names
+### Access requirements
+- SSH with `sudo`, or membership in the `docker` group on the host
+- Access to DNS records for the public domain
 
 ---
 
-## 2. Initial Production Deployment
+## 2. Initial production deployment
 
-### Step 1: Clone Repository
+### Step 1: Clone the repository
 ```bash
 git clone https://github.com/hattapauzi/0x0-dockerized.git /opt/0x0-dockerized
 cd /opt/0x0-dockerized
 ```
 
-### Step 2: Configure Environment Variables
-Copy `.env.example` to `.env` and generate a strong password:
+### Step 2: Configure environment variables
+Copy `.env.example` to `.env` and set a password:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and update values:
+Edit `.env`:
 ```ini
 POSTGRES_DB=fhost
 POSTGRES_USER=fhost
@@ -47,27 +47,27 @@ FHOST_LINK_SECRET=generate_a_64_hex_secret_with_openssl
 ```
 
 > [!IMPORTANT]
-> - `FHOST_LINK_SECRET` is strictly required outside test mode. The application fails closed on startup (`RuntimeError`) if it is unset or empty.
-> - Never commit `.env` or files inside `data/` to version control.
+> - `FHOST_LINK_SECRET` is required outside test mode. The application raises `RuntimeError` on startup if it is unset or empty.
+> - Do not commit `.env` or files inside `data/`.
 
-### Step 3: Build and Start Containers
+### Step 3: Build and start containers
 ```bash
 docker compose up -d --build
 ```
 
-Verify services are healthy:
+Check that services are healthy:
 ```bash
 docker compose ps
 ```
-Both `0x0st` and `postgres` containers should report `Up` and `healthy`.
+Both `0x0st` and `postgres` should report `Up` and `healthy`.
 
 ---
 
-## 3. Reverse Proxy Configuration
+## 3. Reverse proxy configuration
 
-The application container listens on host port `8081` (`8081:8080`). Set up a reverse proxy on port 80/443 with HTTPS.
+The application container listens on host port `8081` (`8081:8080`). Put a reverse proxy on port 80/443 with HTTPS.
 
-### Option A: Nginx Reverse Proxy
+### Option A: Nginx reverse proxy
 Create `/etc/nginx/sites-available/0x0.conf`:
 
 ```nginx
@@ -108,8 +108,8 @@ sudo ln -s /etc/nginx/sites-available/0x0.conf /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### Option B: Caddy Reverse Proxy
-Add to your `/etc/caddy/Caddyfile`:
+### Option B: Caddy reverse proxy
+Add to `/etc/caddy/Caddyfile`:
 
 ```caddy
 files.example.com {
@@ -132,77 +132,79 @@ sudo systemctl reload caddy
 
 ---
 
-## 4. Verification & Smoke Testing
+## 4. Verification and smoke testing
 
-### Upload Verification
+### Upload
 ```bash
 # Upload a test plain text file
 curl -F'file=@0x0/README.rst' https://files.example.com/
 ```
-Output is a 64-character hexadecimal HMAC-SHA256 URL, for example:  
+The output is a 64-character hexadecimal HMAC-SHA256 URL, for example:  
 `https://files.example.com/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst`
 
-### Retrieval Verification
+### Retrieval
 ```bash
-# 1. Test preview retrieval
+# 1. Preview retrieval
 curl -i https://files.example.com/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst
 
-# 2. Test forced download with original filename
+# 2. Forced download with original filename
 curl -i https://files.example.com/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst
 ```
 
-### CSV Preview Verification
+### CSV preview
 ```bash
 # 1. Upload a CSV file
 curl -F'file=@test.csv' https://files.example.com/
 
-# 2. Test CSV table preview HTML page
+# 2. CSV table preview HTML page
 curl -i https://files.example.com/<link>.csv
 
-# 3. Test CSV tile JSON API
+# 3. CSV tile JSON API
 curl -i "https://files.example.com/csv/<link>.csv?rb=0&cb=0"
 ```
 
 ---
 
-## 5. Maintenance & Retention Cleanup
+## 5. Maintenance and retention cleanup
 
-Old files are subject to expiration based on the retention curve. Run the retention cleanup task regularly.
+Old files expire on the retention curve. Run cleanup on a schedule.
 
-### Manual Cleanup
+### Manual cleanup
 ```bash
 docker compose --profile maintenance run --rm cleanup
 ```
 
-### Cleanup Operations Explained
-Running `cleanup.py` executes two coordinated operations:
-1. **Disk Retention Cleanup (`cleanup_expired`):** Computes retention per file size based on the non-linear cubic curve, deletes expired payloads from `data/up/`, and removes orphaned `.csv-index` cache files whose SHA-256 targets have expired.
-2. **Database Data Minimization (`prune_rows`):**
-   - Performs fresh `is_file()` stat checks against disk storage to prevent TOCTOU races with concurrent uploads.
-   - Deletes database rows for unmoderated expired files (`removed=False`), ensuring uploader IP addresses (`addr`) and original filenames do not accumulate indefinitely. Logs `PRUNED_EXPIRED` actions to `file_audit`.
-   - Scrubs uploader IP addresses (`addr = NULL`) on expired moderated files (`removed=True`), minimizing PII while retaining the minimal blocklist entry (`sha256, ext, original_name, link`) needed to return HTTP 451 on re-upload attempts. Logs `MODERATED_ADDR_SCRUBBED` actions to `file_audit`.
+### What cleanup does
+`cleanup.py` runs two operations:
 
-### Inspecting the Non-PII Audit Table (`file_audit`)
-The append-only `file_audit` table tracks compliance, cleanup, and moderation events without storing user IP addresses or payload data:
+1. Disk retention (`cleanup_expired`). Computes retention from file size using the cubic curve, deletes expired payloads from `data/up/`, and removes leftover `.csv-index` files whose SHA-256 targets have expired.
+2. Database minimization (`prune_rows`).
+   - Calls `is_file()` on disk storage before changing rows, so a concurrent upload is not raced (TOCTOU).
+   - Deletes database rows for unmoderated expired files (`removed=False`) so `addr` and original filenames are not kept after expiry. Writes `PRUNED_EXPIRED` to `file_audit`.
+   - Sets `addr = NULL` on expired moderated files (`removed=True`). Keeps `sha256`, `ext`, `original_name`, and `link` so a re-upload still gets HTTP 451. Writes `MODERATED_ADDR_SCRUBBED` to `file_audit`.
+
+### Inspecting `file_audit`
+The append-only `file_audit` table records cleanup and moderation. It does not store user IP addresses or payload bytes:
 
 ```bash
 docker compose exec db psql -U fhost -d fhost -c "SELECT id, sha256, link, action, created_at FROM file_audit ORDER BY id DESC LIMIT 25;"
 ```
 
 Action types:
-- `MODERATED`: File marked as removed by administrator.
-- `PRUNED_EXPIRED`: Expired active database row deleted during retention cleanup.
-- `MODERATED_ADDR_SCRUBBED`: Uploader IP address nulled on expired moderated row.
 
-### Automated Cleanup via Systemd / Cron
+- `MODERATED`: file marked as removed by an administrator.
+- `PRUNED_EXPIRED`: expired active database row deleted during retention cleanup.
+- `MODERATED_ADDR_SCRUBBED`: uploader IP set to NULL on an expired moderated row.
 
-#### Option A: Host Cron Job
-Add to `/etc/cron.d/0x0-cleanup` (runs daily at 03:00 AM):
+### Automated cleanup via systemd or cron
+
+#### Option A: Host cron job
+Add to `/etc/cron.d/0x0-cleanup` (daily at 03:00):
 ```cron
 0 3 * * * root cd /opt/0x0-dockerized && /usr/bin/docker compose --profile maintenance run --rm cleanup > /var/log/0x0-cleanup.log 2>&1
 ```
 
-#### Option B: Systemd Timer
+#### Option B: Systemd timer
 Create `/etc/systemd/system/0x0-cleanup.service`:
 ```ini
 [Unit]
@@ -237,15 +239,15 @@ sudo systemctl enable --now 0x0-cleanup.timer
 
 ---
 
-## 6. Backup & Disaster Recovery
+## 6. Backup and disaster recovery
 
-### What to Back Up
-1. `.env` file (contains database credentials and configuration).
+### What to back up
+1. `.env` (database credentials and configuration).
 2. `./data/up/` (uploaded file payloads).
-3. PostgreSQL database dump (`fhost` database).
+3. PostgreSQL dump of the `fhost` database.
 
-### Backup Procedure
-Create a backup script `backup-0x0.sh`:
+### Backup procedure
+Create `backup-0x0.sh`:
 
 ```bash
 #!/bin/bash
@@ -272,7 +274,7 @@ rm -rf "$BACKUP_DIR"
 echo "Backup completed: $BACKUP_DIR.tar.gz"
 ```
 
-### Restore Procedure
+### Restore procedure
 ```bash
 # 1. Stop app container
 docker compose stop app
@@ -293,9 +295,9 @@ docker compose start app
 
 ---
 
-## 7. Updates & Upgrades
+## 7. Updates
 
-To update to a newer release:
+To move to a newer release:
 ```bash
 cd /opt/0x0-dockerized
 git pull origin master
@@ -309,24 +311,24 @@ docker compose logs app | grep "Running upgrade"
 
 ---
 
-## 8. Troubleshooting & Common Issues
+## 8. Troubleshooting
 
 ### Issue 1: `413 Payload Too Large` during upload
-**Cause:** Upload size exceeds either Flask's `MAX_SIZE_MB` or reverse proxy `client_max_body_size`.  
+**Cause:** Upload size exceeds Flask's `MAX_SIZE_MB` or the reverse proxy `client_max_body_size`.  
 **Resolution:**
-1. Check `.env`: ensure `MAX_SIZE_MB` is set appropriately.
-2. Check Nginx/Caddy config: verify `client_max_body_size` and `proxy_request_buffering off`.
-3. Restart stack: `docker compose up -d`.
+1. Check `.env`: set `MAX_SIZE_MB` as needed.
+2. Check Nginx/Caddy config: `client_max_body_size` and `proxy_request_buffering off`.
+3. Restart the stack: `docker compose up -d`.
 
 ### Issue 2: `502 Bad Gateway` on reverse proxy
-**Cause:** `0x0st` container is not running or crashed.  
+**Cause:** The `0x0st` container is not running or has crashed.  
 **Resolution:**
 1. Inspect container logs: `docker compose logs app --tail=100`.
-2. Check database connection: `docker compose exec db pg_isready -U fhost`.
-3. Restart container: `docker compose restart app`.
+2. Check the database: `docker compose exec db pg_isready -U fhost`.
+3. Restart the container: `docker compose restart app`.
 
 ### Issue 3: Permission denied on `data/up/`
-**Cause:** Storage directory owned by incorrect UID.  
+**Cause:** Storage directory owned by the wrong UID.  
 **Resolution:**
 ```bash
 sudo chown -R 1000:1000 ./data/up
@@ -334,7 +336,7 @@ docker compose restart app
 ```
 
 ### Issue 4: Database migration failure
-**Cause:** Incompatible schema state or locked table.  
+**Cause:** Schema state mismatch or a locked table.  
 **Resolution:**
 ```bash
 # Inspect current revision
@@ -345,20 +347,20 @@ docker compose exec app flask db upgrade
 ```
 
 ### Issue 5: Container fails on startup with `FHOST_LINK_SECRET is required outside testing mode`
-**Cause:** `FHOST_LINK_SECRET` is missing, blank, or not passed into the container environment.  
+**Cause:** `FHOST_LINK_SECRET` is missing, blank, or not passed into the container.  
 **Resolution:**
-1. Check `.env`: ensure `FHOST_LINK_SECRET` is set to a 64-hex string (`openssl rand -hex 32`).
-2. Verify `docker-compose.yml` passes `FHOST_LINK_SECRET: "${FHOST_LINK_SECRET}"` to both `app` and `cleanup` services.
-3. Re-launch stack: `docker compose up -d`.
+1. Check `.env`: set `FHOST_LINK_SECRET` to a 64-hex string (`openssl rand -hex 32`).
+2. Confirm `docker-compose.yml` passes `FHOST_LINK_SECRET: "${FHOST_LINK_SECRET}"` to both `app` and `cleanup`.
+3. Restart: `docker compose up -d`.
 
 ### Issue 6: PostgreSQL driver URL compatibility
-**Cause:** SQLAlchemy 2.x standard `postgresql://` URL expects `psycopg` (v3) by default, while production uses `psycopg2`.  
+**Cause:** SQLAlchemy 2.x treats `postgresql://` as `psycopg` (v3) by default. Production uses `psycopg2`.  
 **Resolution:**
-`0x0/instance/config.py` automatically detects when `psycopg` is absent and translates `postgresql://` URIs to `postgresql+psycopg2://`. If using a custom Python environment outside Docker, ensure `psycopg2` (or `psycopg2-binary`) is installed.
+`0x0/instance/config.py` detects a missing `psycopg` package and rewrites `postgresql://` URIs to `postgresql+psycopg2://`. Outside Docker, install `psycopg2` or `psycopg2-binary`.
 
 ---
 
-## 9. Rollback Procedure
+## 9. Rollback
 
 If a deployment or upgrade fails:
 
@@ -368,7 +370,7 @@ git checkout <previous-stable-tag-or-commit>
 
 # 2. If database migration was applied, downgrade revision
 # NOTE: If new uploads occurred since upgrading to revision b2c3d4e5f6a7 (which have token IS NULL),
-# the downgrade script will safely refuse to execute to prevent unintended data loss.
+# the downgrade script will refuse to run so those rows are not dropped by accident.
 # To proceed, restore the pre-upgrade PostgreSQL backup or delete new rows:
 # docker compose exec db psql -U fhost -d fhost -c "DELETE FROM file WHERE token IS NULL;"
 docker compose exec app flask db downgrade
@@ -379,23 +381,26 @@ docker compose up -d --build
 
 ---
 
-## 10. Secret Key Incident Response & Rotation
+## 10. Secret key incident response and rotation
 
-The `FHOST_LINK_SECRET` environment variable controls HMAC derivation:
+`FHOST_LINK_SECRET` is the HMAC key:
+
 `link = HMAC-SHA256(secret, sha256\0ext\0original_name)`
 
-### Routine Secret Rotation
-Because canonical links are persisted in the `file.link` column:
-- Rotating `FHOST_LINK_SECRET` in `.env` causes subsequent uploads to derive links from the new secret.
-- **Existing links do not break:** Lookups query `file.link` directly, so URLs created under the previous secret remain valid and fully functional.
+### Routine secret rotation
+Canonical links are stored in `file.link`.
 
-### Compromise / Leak Incident Response
-If `FHOST_LINK_SECRET` is compromised by an attacker:
-1. The attacker can perform offline dictionary existence checks against known file hashes.
-2. **Remediation Steps:**
-   1. Generate a fresh secret: `openssl rand -hex 32` and update `FHOST_LINK_SECRET` in `.env`.
-   2. Restart services: `docker compose up -d`.
-   3. Recompute canonical links for existing rows using a Python maintenance script inside the container:
+- Changing `FHOST_LINK_SECRET` in `.env` makes later uploads use the new secret.
+- Existing links keep working. Lookups read `file.link`, so URLs created under the previous secret still resolve.
+
+### Compromise or leak
+If an attacker has `FHOST_LINK_SECRET`:
+
+1. They can check offline whether a known file hash would produce a hosted URL.
+2. Response:
+   1. Generate a new secret with `openssl rand -hex 32` and set `FHOST_LINK_SECRET` in `.env`.
+   2. Restart: `docker compose up -d`.
+   3. Recompute canonical links for existing rows inside the container:
       ```bash
       docker compose exec app python -c '
       import hmac, hashlib
@@ -407,7 +412,7 @@ If `FHOST_LINK_SECRET` is compromised by an attacker:
               msg = f"{f.sha256}\0{f.ext or \"\"}\0{f.original_name or \"\"}".encode("utf-8")
               f.link = hmac.new(secret, msg, hashlib.sha256).hexdigest()
           db.session.commit()
-      print("Successfully re-derived canonical links.")
+      print("Re-derived canonical links.")
       '
       ```
-   4. **Impact Notice:** Re-deriving links changes the canonical URL of all existing hosted files. Any previously distributed URLs will no longer resolve unless re-shared.
+   4. Re-deriving links changes the canonical URL of every hosted file. Previously shared URLs stop resolving until they are shared again.

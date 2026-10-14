@@ -1,23 +1,23 @@
-# 0x0-Dockerized Development & Contributing Guide
+# 0x0-dockerized development
 
-This guide describes how to set up a local development environment, run the test suite, manage database migrations, and contribute changes to `0x0-dockerized`.
+Use this guide for local setup, the test suite, migrations, and pull requests.
 
 ---
 
 ## 1. Prerequisites
 
 - Python 3.10+ (Python 3.14 tested)
-- `libmagic` (`libmagic1` and `libmagic-dev` on Debian/Ubuntu, or `file` package on Fedora/Alpine)
-- SQLite3 (for local test runner)
-- Docker & Docker Compose (for full-stack integration testing)
+- `libmagic` (`libmagic1` and `libmagic-dev` on Debian/Ubuntu, or the `file` package on Fedora/Alpine)
+- SQLite3 (for the local test runner)
+- Docker and Docker Compose (for full-stack tests)
 
 ---
 
-## 2. Local Environment Setup
+## 2. Local environment
 
-### Setting Up the Test Virtual Environment
+### Test virtualenv
 
-A persistent virtual environment should be configured at `~/.venvs/0x0`:
+Put a persistent virtualenv at `~/.venvs/0x0`:
 
 ```bash
 # Create the virtual environment
@@ -36,44 +36,44 @@ cat 0x0/requirements.txt <(grep -v -e '^-r' -e '^uwsgi' -e '^psycopg2' 0x0/requi
 
 ---
 
-## 3. Running Tests
+## 3. Running tests
 
-Tests use an in-memory or temporary SQLite database configured dynamically in `0x0/tests/test_client.py`. The test fixture automatically configures `FHOST_LINK_SECRET = "test-secret"`. No PostgreSQL instance is required for local unit testing.
+Tests use an in-memory or temporary SQLite database set in `0x0/tests/test_client.py`. The fixture sets `FHOST_LINK_SECRET = "test-secret"`. Local unit tests do not need PostgreSQL.
 
-### Execute All Tests
-Always run pytest from the `0x0/` directory:
+### Run all tests
+Always run pytest from `0x0/`:
 
 ```bash
 cd 0x0
 ~/.venvs/0x0/bin/python -m pytest tests/ -q
 ```
 
-All 67 tests across uploads, HMAC derivation, CSV indexing and virtualization, Markdown, Video, and retention pruning should pass cleanly.
+All 67 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, and retention pruning should pass.
 
-### Running Specific Tests
+### Run specific tests
 ```bash
-# Run HMAC link derivation & deduplication tests
+# HMAC link derivation and deduplication
 ~/.venvs/0x0/bin/python -m pytest tests/test_client.py -k "hmac or legacy" -v
 
-# Run CSV table preview and tile API tests
+# CSV table preview and tile API
 ~/.venvs/0x0/bin/python -m pytest tests/test_client.py -k "csv" -v
 
-# Run Video player tests
+# Video player
 ~/.venvs/0x0/bin/python -m pytest tests/test_client.py -k "video" -v
 
-# Run Retention and audit cleanup tests
+# Retention and audit cleanup
 ~/.venvs/0x0/bin/python -m pytest tests/test_client.py -k "prune or cleanup" -v
 ```
 
 ---
 
-## 4. Project Layout
+## 4. Project layout
 
 ```text
 0x0-dockerized/
 ├── 0x0/                          # Flask application package
 │   ├── instance/
-│   │   └── config.py             # Instance configuration overrides & driver fallback
+│   │   └── config.py             # Instance configuration overrides and driver fallback
 │   ├── migrations/               # Alembic database migration scripts
 │   │   └── versions/             # Migration revision files (0d5b8c4b9f0d, a1b2c3d4e5f6, b2c3d4e5f6a7)
 │   ├── templates/                # Server-rendered Jinja2 HTML templates
@@ -84,34 +84,34 @@ All 67 tests across uploads, HMAC derivation, CSV indexing and virtualization, M
 │   │   ├── csv_preview.html      # Virtualized CSV table preview template
 │   │   └── 404.html, etc.        # HTTP error pages
 │   ├── tests/                    # Pytest test suite
-│   │   └── test_client.py        # 67 comprehensive unit & integration tests
+│   │   └── test_client.py        # 67 unit and integration tests
 │   ├── cleanup.py                # Retention cleanup (storage) and prune_rows (DB minimization)
 │   ├── Dockerfile                # App image build recipe
-│   ├── fhost.py                  # Main Flask application entrypoint & routing
+│   ├── fhost.py                  # Flask application entrypoint and routing
 │   ├── requirements.txt          # Production runtime dependencies
-│   └── requirements-dev.txt      # Development & testing dependencies (pytest, playwright)
+│   └── requirements-dev.txt      # Development and testing dependencies (pytest, playwright)
 ├── data/                         # Persistent runtime data (untracked)
 │   ├── db/                       # PostgreSQL data files
 │   └── up/                       # Uploaded file payloads (keyed by SHA-256)
-│       └── .csv-index/           # Binary block offset indexes for fast CSV seeking
+│       └── .csv-index/           # Binary block offset indexes for CSV seeking
 ├── docs/                         # Technical documentation
-│   ├── api.md                    # HTTP API specification
-│   ├── architecture.md           # Architecture design & Mermaid diagrams
-│   ├── runbook.md                # Deployment & Operations runbook
-│   └── development.md            # Developer guide & test environment
+│   ├── api.md                    # HTTP API
+│   ├── architecture.md           # Architecture and Mermaid diagrams
+│   ├── runbook.md                # Deployment and operations
+│   └── development.md            # This guide
 ├── docker-compose.yml            # Docker Compose service definition
 ├── .env.example                  # Environment template
-└── README.md                     # Repository overview & quick start
+└── README.md                     # Repository overview and quick start
 ```
 
 ---
 
-## 5. Database Migration Workflow
+## 5. Database migration workflow
 
-Database schema evolution is managed via Flask-Migrate (Alembic).
+Flask-Migrate (Alembic) owns schema changes.
 
-### Creating a New Migration
-When modifying models (`File`, `FileAudit`, or `URL`) in `0x0/fhost.py`:
+### Creating a new migration
+When you change models (`File`, `FileAudit`, or `URL`) in `0x0/fhost.py`:
 
 ```bash
 cd 0x0
@@ -122,36 +122,37 @@ export FHOST_LINK_SECRET="test-secret"
 ~/.venvs/0x0/bin/flask db migrate -m "describe your changes"
 ```
 
-Inspect the generated migration script under `0x0/migrations/versions/`. Ensure:
-- Both `upgrade()` and `downgrade()` handle SQLite and PostgreSQL compatibility (`op.batch_alter_table`).
-- Backfills safely read `current_app.config.get("FHOST_LINK_SECRET")`.
+Inspect the generated script under `0x0/migrations/versions/`. Check that:
+
+- Both `upgrade()` and `downgrade()` work on SQLite and PostgreSQL (`op.batch_alter_table`).
+- Backfills read `current_app.config.get("FHOST_LINK_SECRET")`.
 - Partial indexes use `postgresql_where` and `sqlite_where`.
 
-### Applying Migrations Locally
+### Applying migrations locally
 ```bash
 ~/.venvs/0x0/bin/flask db upgrade
 ```
 
 ---
 
-## 6. Code Guidelines & Standards
+## 6. Code guidelines
 
-1. **Keep Changes Narrow:** Preserve the single-file simplicity in `0x0/fhost.py` unless modularization is explicitly warranted.
-2. **Deterministic MIME Sniffing:** When adding preview or handler logic, use byte-level magic inspection (`python-magic`), not client-declared headers alone.
-3. **Secret Enforcement:** Any code deriving links must use `make_link(...)` with `FHOST_LINK_SECRET`. The application must fail closed outside testing if the secret is absent.
-4. **Data Minimization & Zero PII:** Never write user IP addresses (`addr`), query strings, or personal data to `file_audit` or permanent audit trails.
-5. **Security Headers:** Every new endpoint or preview builder MUST include `X-Content-Type-Options: nosniff`.
-6. **HTML Sanitization:** Any user-provided content rendered into HTML must be processed through `bleach` or properly escaped.
-7. **No Tracked Runtime Data:** Never commit files in `data/` or any `.env` secrets.
-8. **Code Style:** Follow PEP 8 guidelines (4 spaces indentation, snake_case functions/variables, UPPER_CASE constants). Match surrounding style.
+1. Keep changes narrow. Leave `0x0/fhost.py` as one file unless a split is required.
+2. Detect MIME type from bytes with `python-magic`, not from client headers alone.
+3. Link derivation must go through `make_link(...)` and `FHOST_LINK_SECRET`. Outside testing, a missing secret must raise.
+4. Do not write user IP addresses (`addr`), query strings, or personal data to `file_audit` or other lasting audit trails.
+5. Every new endpoint or preview builder must set `X-Content-Type-Options: nosniff`.
+6. User content rendered as HTML must go through `bleach` or be escaped.
+7. Do not commit files in `data/` or any `.env` secrets.
+8. Follow PEP 8 (4-space indent, snake_case functions and variables, UPPER_CASE constants). Match surrounding style.
 
 ---
 
-## 7. Submitting Changes
+## 7. Submitting changes
 
 Before opening a pull request:
-1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 67 tests must pass).
-2. Test end-to-end in Docker Compose: `docker compose up -d --build` and verify upload/download via `curl`.
-3. If new features or routes were added, add corresponding test cases in `0x0/tests/test_client.py`.
-4. **Branch & Documentation Policy:** Keep feature working documentation, specs, and plans on a dedicated `docs/...` branch. Do not merge feature docs branches into `master`; only merge the implementation branch (`feat/...` or `fix/...`), leaving the docs branch behind, and reference the docs branch in the merge commit message.
 
+1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 67 tests must pass).
+2. Exercise Docker Compose: `docker compose up -d --build` and check upload/download with `curl`.
+3. If you added features or routes, add tests in `0x0/tests/test_client.py`.
+4. Keep working documentation, specs, and plans on a `docs/...` branch. Do not merge feature docs branches into `master`. Merge only the implementation branch (`feat/...` or `fix/...`), leave the docs branch, and name it in the merge commit message.

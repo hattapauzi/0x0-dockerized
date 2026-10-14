@@ -1,27 +1,27 @@
-# 0x0-Dockerized Architecture Documentation
+# 0x0-dockerized architecture
 
-This document describes the architectural design, system boundaries, component interactions, and technical decisions of the `0x0-dockerized` project.
-
----
-
-## 1. System Overview & Context
-
-`0x0-dockerized` is a hardened, self-hosted file hosting service built on top of the `0x0` / The Null Pointer codebase. The repository wraps a Flask application in a robust Docker Compose environment.
-
-### Primary Goals
-1. **Direct File Hosting:** Enable fast, simple file uploads via `curl` and web clients.
-2. **Deterministic & Privacy-Preserving URLs:** Derive 64-character hexadecimal HMAC-SHA256 canonical URLs (`FHOST_LINK_SECRET`), eliminating offline dictionary enumeration attacks while redirecting legacy 12-character tokens via HTTP 301.
-3. **Rich Previews:** Provide instant browser previews for Markdown (`.md`), CSV spreadsheets (`.csv`), Video (`video/*`), and Plain Text (`text/*`) uploads without sacrificing downloadability.
-4. **Filename Preservation:** Retain the original uploaded filename upon download.
-5. **Security Hardening:** Reject executable/active web payloads, disable unsafe proxy/shortener features, and strictly enforce security headers.
-6. **Zero-Overhead Storage & Deduplication:** Deduplicate stored payloads on disk by SHA-256 digest (`data/up/<sha256>`). Deduplicate identical uploads (same content, extension, original name) to the same canonical link while refreshing retention.
-7. **Data Minimization & Compliance:** Automatically prune expired database rows, scrub IP addresses on moderated records, and maintain an append-only, zero-PII audit trail (`file_audit`).
+This file records runtime layout, request flows, schema, and security.
 
 ---
 
-## 2. High-Level Architecture
+## 1. System overview
 
-The system consists of two primary runtime services and an on-demand maintenance task managed via Docker Compose:
+`0x0-dockerized` is a self-hosted file host based on the `0x0` / The Null Pointer codebase. A Flask app runs in Docker Compose.
+
+### Goals
+1. Accept file uploads from `curl` and browsers.
+2. Derive 64-character hexadecimal HMAC-SHA256 URLs from `FHOST_LINK_SECRET`. Without the secret, a guessed URL does not tell you whether a file exists. Legacy 12-character tokens return HTTP 301.
+3. Browser previews for `.md`, `.csv`, `video/*`, and `text/*`. `/download/` still returns the file.
+4. Keep the original filename on download.
+5. Reject executable and active web payloads, disable remote URL fetch and shortening, send `X-Content-Type-Options: nosniff`.
+6. Store each payload once by SHA-256 (`data/up/<sha256>`). Same content, extension, and original name share a canonical link and refresh retention.
+7. Delete expired database rows, set `addr = NULL` on moderated records, and append to `file_audit` without IP addresses.
+
+---
+
+## 2. High-level architecture
+
+Docker Compose runs the app, PostgreSQL, and an on-demand cleanup task:
 
 ```mermaid
 flowchart TD
@@ -69,11 +69,11 @@ flowchart TD
 
 ---
 
-## 3. Core Subsystems & Workflows
+## 3. Core subsystems and workflows
 
-### 3.1 Upload Flow
+### 3.1 Upload flow
 
-When a client performs a `POST /` request with multipart file data:
+When a client sends `POST /` with multipart file data:
 
 ```mermaid
 sequenceDiagram
@@ -115,9 +115,9 @@ sequenceDiagram
     end
 ```
 
-### 3.2 Retrieval & Preview Routing
+### 3.2 Retrieval and preview routing
 
-When a client accesses `GET /<path>` or `GET /download/<path>`:
+When a client requests `GET /<path>` or `GET /download/<path>`:
 
 ```mermaid
 sequenceDiagram
@@ -173,44 +173,48 @@ sequenceDiagram
     end
 ```
 
-### 3.3 CSV Indexing & Virtualized Tiling
+### 3.3 CSV indexing and virtualized tiling
 
-For `.csv` files, rendering large spreadsheets directly in the browser would exhaust memory and cause browser freezing. `0x0-dockerized` implements a virtualized scanning and tiling pipeline:
+Loading a whole CSV into the DOM runs out of memory on large files. The preview uses an on-disk scan index and paints only on-screen cells.
 
-1. **On-Demand Indexing (`csv_index`):**
-   - On the first request to `/path.csv` or `/csv/path.csv`, the file is scanned using an exclusive file lock (`fcntl.flock`).
-   - An on-disk index file is written to `data/up/.csv-index/<sha256>`.
-   - The index binary header stores: `total_rows` (uint64), `max_cols` (uint64), and `stopped` (uint64 flag).
-   - A table of 64-bit file offsets records the byte offset of every 200th row (`CSV_BLOCK_ROWS = 200`).
-   - If a line exceeds 4MB (`CSV_MAX_LINE_BYTES`), scanning halts gracefully and marks `stopped=True`, preserving rows indexed prior to the error.
-2. **Virtualized DOM Grid:**
-   - `csv_preview.html` initializes a lightweight virtualized viewport that draws only cells currently visible on screen.
-   - Pinned row and column headers enable smooth horizontal and vertical scrolling.
-   - Quick jump navigation: Toolbar inputs for Row and Column jump directly to arbitrary coordinates.
-3. **Paginated JSON Tiles (`/csv/<link><ext>?rb=&cb=`):**
-   - Tile requests jump directly to `offsets[rb]` on disk, avoiding sequential parsing from line 0.
-   - Yields 200-row by 50-column text matrices with middle-truncated strings (`CSV_CELL_PREVIEW_CHARS = 50`).
-4. **Full Cell Inspection (`/csv/<link><ext>?r=&c=`):**
-   - Clicking any cell fetches the unabbreviated cell text in a modal dialog.
+1. On-demand indexing (`csv_index`).
+   On the first request to `/path.csv` or `/csv/path.csv`, the file is scanned under an exclusive lock (`fcntl.flock`).
+   The index is written to `data/up/.csv-index/<sha256>`.
+   The binary header stores `total_rows` (uint64), `max_cols` (uint64), and `stopped` (uint64 flag).
+   A table of 64-bit file offsets records the byte offset of every 200th row (`CSV_BLOCK_ROWS = 200`).
+   If a line exceeds 4MB (`CSV_MAX_LINE_BYTES`), scanning stops and sets `stopped=True`. Rows indexed before that line are kept.
 
-### 3.4 Data Minimization & Retention Cleanup
+2. Virtualized DOM grid.
+   `csv_preview.html` draws only cells currently on screen.
+   Row and column headers stay pinned while the sheet scrolls.
+   Toolbar inputs jump to a row or column.
 
-The maintenance service (`cleanup.py`) enforces privacy and data minimization in two distinct phases:
+3. Paginated JSON tiles (`/csv/<link><ext>?rb=&cb=`).
+   A tile request seeks to `offsets[rb]` on disk instead of parsing from line 0.
+   Each tile is a 200-row by 50-column text matrix. Strings longer than `CSV_CELL_PREVIEW_CHARS = 50` are truncated in the middle.
 
-1. **Disk Retention Cleanup (`cleanup_expired`):**
-   - Scans `data/up/` and computes each file's maximum retention age using the cubic decay formula.
-   - Deletes expired storage payloads from disk.
-   - Deletes orphaned `.csv-index` files whose corresponding SHA-256 payloads are no longer present.
-2. **Database Row Pruning & PII Scrubbing (`prune_rows`):**
-   - Employs a TOCTOU-reduced check: before deleting or modifying database rows, it queries disk storage with a fresh `target_file.is_file()` check.
-   - **Active Expired Rows (`removed=False`):** Deletes the database records to minimize retained metadata (uploader IP, custom filenames) once storage is expired. Records `PRUNED_EXPIRED` in `file_audit`.
-   - **Moderated Records (`removed=True`):** Retains minimal blocklist metadata (`sha256`, `ext`, `original_name`, `link`) to reject future re-upload attempts with HTTP 451, but immediately scrubs the uploader IP (`addr = NULL`). Records `MODERATED_ADDR_SCRUBBED` in `file_audit`.
+4. Full cell inspection (`/csv/<link><ext>?r=&c=`).
+   Clicking a cell fetches the full cell text into a dialog.
+
+### 3.4 Data minimization and retention cleanup
+
+`cleanup.py` runs two phases:
+
+1. Disk retention (`cleanup_expired`).
+   Scans `data/up/` and computes each file's maximum retention age from the cubic decay formula.
+   Deletes expired storage payloads.
+   Deletes `.csv-index` files whose SHA-256 payload is gone.
+
+2. Database row pruning and IP scrubbing (`prune_rows`).
+   Before deleting or changing a row, it checks disk again with `target_file.is_file()` so a concurrent upload is not raced (TOCTOU).
+   Active expired rows (`removed=False`): delete the database records (uploader IP, custom filenames) once storage is gone. Write `PRUNED_EXPIRED` to `file_audit`.
+   Moderated records (`removed=True`): keep `sha256`, `ext`, `original_name`, and `link` so a later re-upload still gets HTTP 451. Set `addr = NULL`. Write `MODERATED_ADDR_SCRUBBED` to `file_audit`.
 
 ---
 
-## 4. Database Schema & Migration Architecture
+## 4. Database schema and migrations
 
-Database state is tracked through Alembic / Flask-Migrate in `0x0/migrations/`.
+Alembic / Flask-Migrate tracks schema in `0x0/migrations/`.
 
 ```mermaid
 erDiagram
@@ -237,50 +241,49 @@ erDiagram
 
     URL {
         int id PK
-        text url UK "URL string (legacy/unused in hardened mode)"
+        text url UK "URL string (legacy, unused)"
     }
 ```
 
-### Partial Indexes and Token Nullability
-- **`uq_file_link`:** `CREATE UNIQUE INDEX uq_file_link ON file(link) WHERE token IS NULL;`
-  - Allows legacy duplicate uploads sharing the same content and filename to coexist with the same backfilled HMAC link without index collision.
-  - Strictly enforces deduplication on all new uploads (`token IS NULL`).
-- **`ix_file_link`:** Non-unique index on `file(link)` for fast lookups across both legacy and new uploads.
-- **`ix_file_sha256`:** Index on `file(sha256)` accelerating deduplication checks, disk lookups, and `prune_rows` batch queries.
+### Partial indexes and token nullability
+- `uq_file_link`: `CREATE UNIQUE INDEX uq_file_link ON file(link) WHERE token IS NULL;`
+  Legacy duplicate uploads that share content and filename can keep the same backfilled HMAC link without colliding.
+  New uploads (`token IS NULL`) stay unique on `link`.
+- `ix_file_link`: non-unique index on `file(link)` for lookups of both legacy and new uploads.
+- `ix_file_sha256`: index on `file(sha256)` for deduplication checks, disk lookups, and `prune_rows` batches.
 
-### Key Schema Evolutions
-1. **Random Token Migration (`0d5b8c4b9f0d`)**: Introduced 12-character random tokens using a 64-character URL-safe alphabet, replacing sequential integer IDs.
-2. **Filename Preservation Migration (`a1b2c3d4e5f6`)**: Added `original_name` column and allowed multiple distinct upload tokens to point to the same deduplicated `sha256` payload.
-3. **HMAC Links & Audit Table Migration (`b2c3d4e5f6a7`)**: Added `link` column (backfilled via `FHOST_LINK_SECRET`), created `file_audit` table, indexed `sha256` and `link`, made `token` nullable, and enforced unique partial index `uq_file_link`.
-
----
-
-## 5. Security Architecture
-
-### 5.1 Defense in Depth Strategy
-1. **HMAC-SHA256 Link Derivation:** Public URLs cannot be predicted or enumerated offline without knowing the server's `FHOST_LINK_SECRET`.
-2. **Strict MIME Sniffing:** MIME types are detected directly from file byte content using `python-magic` (`libmagic`), ignoring user-supplied HTTP `Content-Type` headers if fraudulent.
-3. **Active Web Payload Blacklist:** Rejection of HTML, XML, SVG, Java bytecode, and Windows binaries mitigates XSS, CSRF, and drive-by malware distribution.
-4. **HTML Sanitization:** Markdown rendering uses `bleach` to whitelist safe HTML tags (`<p>`, `<h1>`-`<h6>`, `<code>`, `<pre>`, `<table>`, `<a>`, `<img>`, etc.) and strip unsafe tags/scripts.
-5. **Security Headers:** Every response is delivered with `X-Content-Type-Options: nosniff`. Downloads are served as attachments (`Content-Disposition: attachment`).
-6. **Zero-PII Audit Logging:** The `file_audit` table logs moderation and cleanup actions without recording uploader IP addresses, query parameters, or personal data.
-7. **Attack Surface Reduction:**
-   - Remote URL fetching (`url=` parameter) is completely disabled to eliminate Server-Side Request Forgery (SSRF).
-   - Generic URL shortening is disabled.
-8. **Container Isolation:** The uWSGI server executes as an unprivileged user (`app`, UID/GID 1000). The database port (`5432`) is internal to the Docker network.
+### Schema history
+1. Random token migration (`0d5b8c4b9f0d`). Replaced sequential integer IDs with 12-character random tokens from a 64-character URL-safe alphabet.
+2. Filename preservation migration (`a1b2c3d4e5f6`). Added `original_name`. Distinct upload tokens can point at the same `sha256` payload.
+3. HMAC links and audit table migration (`b2c3d4e5f6a7`). Added `link` (backfilled with `FHOST_LINK_SECRET`), created `file_audit`, indexed `sha256` and `link`, made `token` nullable, and added unique partial index `uq_file_link`.
 
 ---
 
-## 6. Key Design Decisions and Trade-offs
+## 5. Security
 
-| Decision | Approach Chosen | Rationale | Alternatives Considered |
+### 5.1 Controls
+1. HMAC-SHA256 link derivation. Public URLs cannot be predicted or listed offline without `FHOST_LINK_SECRET`.
+2. MIME detection. `python-magic` (`libmagic`) reads bytes from the file. A spoofed HTTP `Content-Type` is ignored.
+3. Active web payload blacklist. HTML, XML, SVG, Java bytecode, and Windows binaries are rejected, which cuts XSS and executable downloads.
+4. HTML sanitization. Markdown rendering uses `bleach` to allow tags such as `<p>`, `<h1>`-`<h6>`, `<code>`, `<pre>`, `<table>`, `<a>`, and `<img>`, and to strip scripts and other unsafe tags.
+5. Security headers. Every response includes `X-Content-Type-Options: nosniff`. Downloads use `Content-Disposition: attachment`.
+6. Audit logging. `file_audit` records moderation and cleanup actions. It does not store uploader IP addresses, query parameters, or other personal data.
+7. Disabled features.
+   Remote URL fetching (`url=` parameter) is off, which removes SSRF from that path.
+   Generic URL shortening is off.
+8. Container isolation. uWSGI runs as user `app` (UID/GID 1000). PostgreSQL port `5432` is internal to the Docker network.
+
+---
+
+## 6. Design decisions
+
+| Decision | Approach chosen | Rationale | Alternatives considered |
 |---|---|---|---|
-| **URL Identifiers** | Deterministic 64-hex HMAC-SHA256 links | Privacy-preserving (prevents offline existence checks), enables duplicate upload deduplication, disjoint length (64-hex vs 12-char tokens) allows unambiguous routing. | Raw SHA-256 (allows dictionary existence attacks) or random UUID/tokens (prevents deduplication). |
-| **Duplicate Uploads & Partial Index** | `uq_file_link WHERE token IS NULL` | Allows existing legacy duplicate rows to share the same backfilled HMAC link without schema violation, while strictly enforcing deduplication on all new uploads. | Global unique index (fails during migration due to existing duplicate legacy tokens) or non-unique index (fails to enforce deduplication). |
-| **Legacy Token Phase-Out** | HTTP 301 Permanent Redirect to 64-hex canonical URL | Preserves backwards compatibility for existing shared links and bookmarks while migrating traffic to canonical format. As legacy files expire and get pruned, legacy tokens naturally phase out completely. | Breaking existing links (poor UX) or dual lookups forever without redirection (fragmented URLs). |
-| **Data Minimization** | Prune expired DB rows and scrub moderated IPs | Prevents unbounded accumulation of uploader IPs (`addr`) and filenames; converges table towards tokenless canonical schema. | Keeping DB rows forever (PII retention liability and database bloat). |
-| **CSV Table Preview** | Virtualized HTML grid with on-disk scan index | Only on-screen cells are drawn; tiles come from `GET /csv/` so large sheets stay responsive. The scan index avoids re-parsing the whole file per tile. | Full in-page table or loading the entire CSV into JS (rejected: memory and DOM exhaustion on large files). |
-| **Video Preview** | Native HTML5 `<video>` player pointing at `/download/` route | Zero external JS dependencies, lightweight, supports HTTP Range seeking out-of-the-box in Flask 3.1. | Video.js or CDN player (rejected: external dependency and heavier footprint). |
-| **Markdown & Diagram Preview** | Server-side Python-Markdown + Bleach, client-side Mermaid.js 10.9.1 | Fast initial HTML render, strict security sanitization, diagrams rendered seamlessly on demand. | Full client-side markdown parsing or server-side puppeteer diagram rendering (heavy). |
-| **Web Server Layer** | uWSGI HTTP socket mapped to host port `8081` | Simple standalone container stack, ready to sit behind any external TLS reverse proxy (Nginx, Caddy, Cloudflare, Traefik). | Built-in Nginx container in Compose (added configuration overhead when users already have a host reverse proxy). |
-
+| URL identifiers | Deterministic 64-hex HMAC-SHA256 links | Offline existence checks fail without the secret. Duplicate uploads can share a link. 64-hex vs 12-char tokens can be routed without ambiguity. | Raw SHA-256 (a known file hashes to a guessable URL) or random UUID/tokens (blocks deduplication). |
+| Duplicate uploads and partial index | `uq_file_link WHERE token IS NULL` | Legacy duplicate rows can share a backfilled HMAC link. New uploads stay unique on `link`. | Global unique index (breaks the migration on existing duplicate legacy tokens) or a non-unique index (does not enforce deduplication). |
+| Legacy token phase-out | HTTP 301 to the 64-hex canonical URL | Existing shared links keep working. After those files expire and are pruned, the tokens go away. | Break old links, or look up both forms forever with no redirect. |
+| Data minimization | Prune expired DB rows and scrub moderated IPs | Stops unbounded growth of `addr` and filenames. The table moves toward tokenless canonical rows. | Keep DB rows forever (PII retained, table grows without bound). |
+| CSV table preview | Virtualized HTML grid with on-disk scan index | Only on-screen cells are drawn. Tiles come from `GET /csv/`. The scan index avoids re-parsing the whole file per tile. | Full in-page table, or load the entire CSV into JS (memory and DOM exhaustion on large files). |
+| Video preview | Native HTML5 `<video>` player pointing at `/download/` | No extra JS. Flask 3.1 `send_file` handles `Range` / `206`. | Video.js or a CDN player (extra dependency). |
+| Markdown and diagram preview | Server-side Python-Markdown + Bleach, client-side Mermaid.js 10.9.1 | HTML is built on the server and sanitized. Mermaid runs in the browser for ` ```mermaid ` blocks. | Full client-side markdown parsing, or Puppeteer on the server for diagrams. |
+| Web server | uWSGI HTTP socket mapped to host port `8081` | One container stack. Put Nginx, Caddy, Cloudflare, or Traefik in front for TLS. | Nginx inside Compose (extra config when a host reverse proxy already exists). |

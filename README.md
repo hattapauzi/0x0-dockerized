@@ -4,36 +4,36 @@
 [![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![License: EUPL 1.2](https://img.shields.io/badge/License-EUPL%201.2-blue.svg)](https://joinup.ec.europa.eu/software/page/eupl)
 
-A hardened, lightweight, self-hosted file hosting service built on top of [0x0 / The Null Pointer](https://0x0.st). Packaged with Docker Compose, PostgreSQL persistence, and automatic retention cleanup.
+A self-hosted file host based on [0x0 / The Null Pointer](https://0x0.st). It runs under Docker Compose with PostgreSQL and automatic retention cleanup.
 
 ---
 
-## ✨ Features & Hardening
+## Features
 
-- **Fast & Direct Uploads:** Simple `multipart/form-data` uploads via `curl`, browser, or scripts.
-- **Deterministic HMAC-SHA256 Links:** Canonical public URLs use 64-character hexadecimal HMAC-SHA256 digests derived from a server secret, file hash, extension, and original filename. This prevents enumeration, protects against offline dictionary attacks, and deduplicates identical uploads.
-- **Legacy URL Support:** Legacy 12-character random tokens are permanently redirected (`301 Moved Permanently`) to their canonical 64-hex URLs, maintaining backward compatibility.
-- **Smart Browser Previews:**
-  - **Markdown (`.md`):** Server-rendered Markdown with Bleach HTML sanitization, table formatting, and client-side **Mermaid diagram rendering**.
-  - **CSV (`.csv`):** Interactive virtualized table preview grid with on-disk block seeking (`.csv-index`), row and column jump boxes, adaptive column widths, and a paginated JSON tile/cell API (`GET /csv/`).
-  - **Video (`video/*`):** Standalone preview with native HTML5 `<video>` player and HTTP byte range-seeking support (`206 Partial Content`).
-  - **Plain Text (`text/*`):** Clean `<pre>`-formatted browser preview.
-- **Filename Preservation:** Original uploaded filenames are preserved when downloading via the `/download/` route or direct binary links.
-- **Smart Deduplication & Privacy:** Identical uploads (matching bytes, extension, and original filename) deduplicate to the same canonical link and touch storage to refresh retention without inserting duplicate rows. Distinct filenames for identical bytes derive distinct links pointing to the same deduplicated storage payload (`data/up/<sha256>`).
-- **Dynamic Retention & Data Minimization:** Sliding-scale retention policy from 30 days (max file size) up to 365 days (small files). Retention cleanup prunes expired database rows and disk files, scrubs uploader IP addresses on moderated records, and logs compliance events to a zero-PII `file_audit` table.
-- **Security Hardened:**
-  - Server secret (`FHOST_LINK_SECRET`) strictly required outside test mode.
-  - Moderated content checks return `451 Unavailable For Legal Reasons` immediately on re-upload.
-  - Active web payloads (HTML, SVG, XML, Java archives, Windows executables) are blocked by default (`415 Unsupported Media Type`).
-  - Remote URL import and generic URL shortening are disabled.
-  - `X-Content-Type-Options: nosniff` sent on all responses.
-  - Application runs as an unprivileged user (`app`, UID/GID 1000).
+- Upload files with `multipart/form-data` from `curl`, a browser, or a script.
+- Canonical public URLs are 64-character hexadecimal HMAC-SHA256 digests of a server secret, file hash, extension, and original filename. Without the secret, a guessed URL does not tell you whether a file exists. The same bytes, extension, and filename always produce the same link.
+- Legacy 12-character random tokens return `301 Moved Permanently` to the canonical 64-hex URL.
+- Browser previews:
+  - Markdown (`.md`): server-rendered Markdown with Bleach HTML sanitization, tables, and client-side Mermaid diagrams.
+  - CSV (`.csv`): virtualized table grid with on-disk block seeking (`.csv-index`), row and column jump boxes, adaptive column widths, and a paginated JSON tile/cell API (`GET /csv/`).
+  - Video (`video/*`): HTML5 `<video>` player with HTTP byte-range seeking (`206 Partial Content`).
+  - Plain text (`text/*`): `<pre>` preview.
+- Downloads through `/download/` and direct binary links keep the original filename.
+- Identical uploads (same bytes, extension, and original filename) reuse the canonical link and `touch` storage to refresh retention. Distinct filenames for identical bytes get distinct links that point at the same `data/up/<sha256>` payload.
+- Retention scales from 30 days at maximum file size to 365 days for small files. Cleanup deletes expired disk files and unmoderated database rows, sets `addr = NULL` on moderated records, and writes events to a `file_audit` table that does not store IP addresses.
+- Security:
+  - `FHOST_LINK_SECRET` is required outside test mode.
+  - Re-upload of moderated content returns `451 Unavailable For Legal Reasons`.
+  - HTML, SVG, XML, Java archives, and Windows executables return `415 Unsupported Media Type` by default.
+  - Remote URL import and generic URL shortening are off.
+  - Responses include `X-Content-Type-Options: nosniff`.
+  - The app runs as user `app` (UID/GID 1000).
 
 ---
 
-## 🚀 Quick Start (< 5 Minutes)
+## Quick start (< 5 minutes)
 
-### 1. Clone & Configure
+### 1. Clone and configure
 ```bash
 git clone https://github.com/hattapauzi/0x0-dockerized.git
 cd 0x0-dockerized
@@ -41,7 +41,7 @@ cd 0x0-dockerized
 cp .env.example .env
 ```
 
-Edit `.env` and set a strong database password and HMAC secret key:
+Edit `.env` and set a database password and HMAC secret:
 ```ini
 POSTGRES_DB=fhost
 POSTGRES_USER=fhost
@@ -54,29 +54,28 @@ MAX_SIZE_NGINX=512M
 FHOST_LINK_SECRET=your_secure_random_64_hex_secret_here
 ```
 
-### 2. Start the Stack
+### 2. Start the stack
 ```bash
 docker compose up -d --build
 ```
 
-The application runs on host port **`8081`** (`8081:8080`). Database migrations run automatically on startup.
+The application listens on host port `8081` (`8081:8080`). Database migrations run on startup.
 
-### 3. Smoke Test
-Upload a test file using `curl`:
+### 3. Smoke test
 ```bash
 curl -F'file=@0x0/README.rst' http://localhost:8081/
 ```
 
-**Output:**
+Output:
 ```text
 https://localhost/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.rst
 ```
 
 ---
 
-## 📖 Usage & API Quick Reference
+## Usage
 
-### Uploading Files
+### Uploading files
 ```bash
 # Upload a file
 curl -F'file=@image.png' https://your-domain.example/
@@ -85,76 +84,77 @@ curl -F'file=@image.png' https://your-domain.example/
 curl -F'file=@document.md;filename=architecture-spec.md' https://your-domain.example/
 ```
 
-### Retrieving & Downloading Files
-- **View / Preview:** `GET /<link><ext>` (e.g., `https://your-domain.example/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
-  - `.md` files render a Markdown preview with Mermaid diagrams and a top Download link.
-  - `.csv` files render an interactive virtualized CSV table preview with jump boxes and a top Download link.
-  - `video/*` files render an HTML5 video playback preview.
+### Retrieving and downloading files
+- View / preview: `GET /<link><ext>` (for example `https://your-domain.example/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
+  - `.md` files render a Markdown preview with Mermaid diagrams and a Download link.
+  - `.csv` files render a virtualized CSV table preview with jump boxes and a Download link.
+  - `video/*` files render an HTML5 video preview.
   - `text/*` files render a plain text preview.
-  - Binary/media files download directly as attachments.
-  - Legacy URLs (`GET /<token><ext>`) automatically return `301 Moved Permanently` to the canonical link.
-- **Forced Download:** `GET /download/<link><ext>` (e.g., `https://your-domain.example/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
-  - Bypasses preview pages and downloads the file with its original filename preserved in `Content-Disposition`.
-- **CSV Data Tiles:** `GET /csv/<link><ext>?rb=0&cb=0` (or `?r=0&c=0` for cell inspection)
-  - Returns paginated 200×50 JSON cell matrices for the virtualized CSV table preview.
+  - Binary and other media download as attachments.
+  - Legacy URLs (`GET /<token><ext>`) return `301 Moved Permanently` to the canonical link.
+- Forced download: `GET /download/<link><ext>` (for example `https://your-domain.example/download/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.md`)
+  - Skips preview pages and sends the file with the original filename in `Content-Disposition`.
+- CSV data tiles: `GET /csv/<link><ext>?rb=0&cb=0` (or `?r=0&c=0` for one cell)
+  - Returns paginated 200×50 JSON cell matrices for the CSV table preview.
 
-For the complete API specification, see **[API Documentation](docs/api.md)**.
+See [API documentation](docs/api.md).
 
 ---
 
-## ⚙️ Configuration Reference
+## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `FHOST_LINK_SECRET` | *None (Required)* | 32-byte hex secret (`openssl rand -hex 32`) used for HMAC-SHA256 link derivation. Application fails closed on startup if unset. |
-| `DATABASE_URI` | `postgresql://fhost:...@db/fhost` | SQLAlchemy connection string (supports `postgresql://` with automatic `psycopg2` fallback). |
+| `FHOST_LINK_SECRET` | None (required) | 32-byte hex secret (`openssl rand -hex 32`) used for HMAC-SHA256 link derivation. Startup fails if this is unset. |
+| `DATABASE_URI` | `postgresql://fhost:...@db/fhost` | SQLAlchemy connection string (`postgresql://` falls back to `psycopg2`). |
 | `POSTGRES_DB` | `fhost` | PostgreSQL database name |
 | `POSTGRES_USER` | `fhost` | PostgreSQL username |
 | `POSTGRES_PASSWORD` | `change-me` | PostgreSQL user password |
 | `MAX_SIZE_MB` | `512` | Max upload size in megabytes |
 | `PREFERRED_URL_SCHEME`| `https` | URL scheme used for generated public links |
-| `FHOST_TOKEN_LENGTH` | `12` | Length of generated legacy random tokens (legacy mode) |
+| `FHOST_TOKEN_LENGTH` | `12` | Length of generated legacy random tokens |
 
 ---
 
-## 🛠️ Maintenance & Retention Cleanup
+## Maintenance and retention cleanup
 
-Run the cleanup job manually or via cron to prune files exceeding the retention duration and minimize database records:
+Run the cleanup job by hand or from cron to delete files past the retention window and prune database rows:
 
 ```bash
 docker compose --profile maintenance run --rm cleanup
 ```
 
-The maintenance worker executes:
-1. **Disk Retention Cleanup (`cleanup_expired`):** Deletes expired payloads from disk and clears orphaned `.csv-index` cache files.
-2. **Database Data Minimization (`prune_rows`):** Deletes database rows for unmoderated expired files, scrubs uploader IP addresses (`addr = NULL`) on moderated records, and logs non-PII compliance events in `file_audit`.
+The maintenance worker:
 
-See **[Operations Runbook](docs/runbook.md)** for automated cron / systemd timer setup, backup procedures, audit table inspection, secret rotation, and reverse proxy templates (Nginx & Caddy).
+1. Disk retention (`cleanup_expired`). Deletes expired payloads from disk and leftover `.csv-index` files.
+2. Database minimization (`prune_rows`). Deletes rows for unmoderated expired files, sets `addr = NULL` on moderated records, and writes events without IP addresses to `file_audit`.
+
+See the [operations runbook](docs/runbook.md) for cron / systemd timers, backups, audit queries, secret rotation, and Nginx / Caddy templates.
 
 ---
 
-## 🧪 Local Development & Testing
+## Local development and testing
 
-A local virtual environment can be configured to run tests without starting Docker:
+A local virtualenv can run tests without Docker:
 
 ```bash
 cd 0x0
 ~/.venvs/0x0/bin/python -m pytest tests/ -q
 ```
 
-For full setup instructions, see **[Development Guide](docs/development.md)** and **[Contributing Guide](CONTRIBUTING.md)**.
+See the [development guide](docs/development.md) and [contributing guide](CONTRIBUTING.md).
 
 ---
 
-## 📚 Documentation Index
+## Documentation
 
-- **[API Reference](docs/api.md):** Complete HTTP endpoint documentation, CSV tile API, status codes, and examples.
-- **[Architecture & Design](docs/architecture.md):** Architecture diagrams, HMAC-SHA256 link derivation, CSV indexing, deduplication, and security models.
-- **[Operations Runbook](docs/runbook.md):** Production deployment, Nginx/Caddy proxy setup, backups, audit table queries, secret rotation, and troubleshooting.
-- **[Development & Testing](docs/development.md):** Local virtualenv setup, pytest suite, Playwright browser tests, and database migrations.
+- [API](docs/api.md)
+- [Architecture](docs/architecture.md)
+- [Operations runbook](docs/runbook.md)
+- [Development](docs/development.md)
 
 ---
 
-## 📄 License
+## License
 
-Licensed under the **EUPL, Version 1.2** (or subsequent approved versions). See [LICENSE](0x0/LICENSE) for details.
+Licensed under the EUPL, Version 1.2 (or later approved versions). See [LICENSE](0x0/LICENSE).
