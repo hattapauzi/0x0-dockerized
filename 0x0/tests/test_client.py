@@ -743,6 +743,61 @@ def test_csv_preview_no_grid_when_empty(client):
     assert "<dialog" not in html
 
 
+@pytest.mark.parametrize("width", [240, 400])
+def test_csv_preview_long_cells_preserve_horizontal_scroll(client, width):
+    from playwright.sync_api import sync_playwright
+
+    rv = client.post(
+        "/",
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(("x" * 512 + ",last\n").encode()), "wide.csv")},
+    )
+    path = get_uploaded_path(rv)
+    responses = {
+        "/" + path: client.get(path),
+        "/csv/" + path + "?rb=0&cb=0": client.get(
+            "/csv/" + path, query_string={"rb": "0", "cb": "0"},
+        ),
+    }
+
+    def serve(route):
+        url = urlparse(route.request.url)
+        response = responses[url.path + ("?" + url.query if url.query else "")]
+        route.fulfill(
+            status=response.status_code,
+            headers=dict(response.headers),
+            body=response.data,
+        )
+
+    with sync_playwright() as playwright:
+        with playwright.chromium.launch(
+            channel="chromium",
+            executable_path=os.environ.get("CHROMIUM_EXECUTABLE_PATH"),
+        ) as browser:
+            page = browser.new_page(viewport={"width": width, "height": 300})
+            page.set_default_timeout(5000)
+            page.route("http://localhost/**", serve)
+            page.goto("http://localhost/" + path)
+            page.wait_for_function("document.querySelector('tbody td').textContent.length > 0")
+            dimensions = page.evaluate("""() => {
+                const box = document.querySelector('.scrollbox');
+                const cells = document.querySelector('tbody tr').cells;
+                return [cells[0].offsetWidth, cells[1].offsetWidth,
+                        box.scrollWidth, box.clientWidth];
+            }""")
+            assert dimensions[:2] == [80, 120]
+            if width == 400:
+                assert dimensions[2] == dimensions[3]
+            else:
+                page.evaluate("document.querySelector('.scrollbox').scrollLeft = 50")
+                page.wait_for_function("document.querySelector('tbody td').getBoundingClientRect().x === 30")
+                assert page.locator('tbody th').bounding_box()["x"] == 0
+                assert page.locator('thead .cell').first.bounding_box()["x"] == 30
+                page.evaluate("document.querySelector('.scrollbox').scrollLeft = 120")
+                page.wait_for_function("document.querySelector('thead .cell').textContent === 'B'")
+                assert page.locator('tbody td').first.text_content() == "last"
+
+
 def test_csv_index_is_reused_on_second_get(client, monkeypatch):
     fhost = sys.modules["fhost"]
     calls = {"n": 0}

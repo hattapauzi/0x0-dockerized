@@ -150,6 +150,7 @@
         viewport.style.overflow = "visible";
         poolRows = Math.min(CFG.rows, viewRows + 2);
         poolCols = CFG.cols === 0 ? 0 : Math.min(CFG.cols, viewCols + 2);
+        table.style.width = (NW + poolCols * CW) + "px";
         table.replaceChildren();
         const head = table.createTHead();
         const hr = head.insertRow();

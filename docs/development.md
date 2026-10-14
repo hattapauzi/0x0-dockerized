@@ -29,6 +29,9 @@ cat 0x0/requirements.txt <(grep -v -e '^-r' -e '^uwsgi' -e '^psycopg2' 0x0/requi
 
 # Install dependencies
 ~/.venvs/0x0/bin/pip install -r /tmp/reqs-0x0.txt
+
+# Install Chromium for CSV preview browser regression tests
+~/.venvs/0x0/bin/python -m playwright install chromium
 ```
 
 ---
