@@ -11,6 +11,7 @@ This is the HTTP API for the 0x0-dockerized file host.
 - Legacy 12-character tokens return HTTP 301 to the canonical HMAC URL.
 - Browser previews for Markdown (`.md`), CSV (`.csv`), video (`video/*`), and plain text (`text/*`).
 - `/download/` keeps the original filename.
+- `/raw/` serves raster image and PDF bytes inline for preview tags.
 - Identical bytes, extension, and filename reuse the existing link and refresh retention.
 - Retention follows a size curve. Cleanup prunes database rows and writes audit rows without IP addresses.
 
@@ -127,9 +128,12 @@ flowchart TD
     MATCH_LINK -- "Missing storage" --> E404
     MATCH_LINK -- "Valid" --> ROUTE{"File Type Check"}
 
+    ROUTE -- "HTML / SVG / XML / JS" --> DLONLY["Opaque octet-stream attachment\n(CSP sandbox, never live render)"]
     ROUTE -- ".md extension" --> MD["Render Markdown Preview\n(HTML + Mermaid.js + Download Link)"]
     ROUTE -- ".csv extension" --> CSV["Render CSV Table Preview\n(Virtualized Grid + /csv/ Tiles)"]
     ROUTE -- "video/* MIME" --> VID["Render Video Player Preview\n(HTML5 <video> + Download Link)"]
+    ROUTE -- "raster image/*" --> IMG["Render Image Preview\n(<img> + /raw/ inline bytes)"]
+    ROUTE -- "application/pdf" --> PDF["Render PDF Preview\n(sandboxed iframe + /raw/)"]
     ROUTE -- "text/* MIME" --> TXT["Render Plain Text Preview\n(<pre> + Download Link)"]
     ROUTE -- "Other / Binary" --> BIN["Direct Attachment Download\n(Content-Disposition: attachment)"]
 ```
@@ -165,11 +169,28 @@ flowchart TD
    The player source is `/download/<link><extension>`, which accepts HTTP Range requests (`206 Partial Content`).
    Sets `X-Content-Type-Options: nosniff`.
 
-5. Plain text preview (`text/*` files that are not `.md` or `.csv`).
+5. Raster image preview (`image/*` except SVG).
+   Renders `image_preview.html` with an `<img>` whose `src` is `/raw/<link><extension>` (`Content-Disposition: inline`).
+   SVG is not included; it is download-only.
+   A Download link points to `/download/<link><extension>`.
+   Sets `X-Content-Type-Options: nosniff`.
+
+6. PDF preview (`application/pdf`).
+   Renders `pdf_preview.html` with a sandboxed iframe (`sandbox="allow-scripts"`, no `allow-same-origin`) whose `src` is `/raw/<link><extension>`.
+   `/raw/` sends `Content-Disposition: inline` and a restrictive CSP.
+   A Download link points to `/download/<link><extension>`.
+   Sets `X-Content-Type-Options: nosniff`.
+   Browser PDF engines can still have bugs; this is not a malware scanner.
+
+7. Plain text preview (`text/*` files that are not `.md`, `.csv`, HTML, XML, or JavaScript).
    Renders HTML with a Download link and HTML-escaped text inside `<pre>`.
    Sets `X-Content-Type-Options: nosniff`.
 
-6. Binary and other files (for example `.png`, `.pdf`, `.zip`, `.tar.gz`).
+8. Download-only active web content (HTML, XHTML, SVG, XML, JavaScript).
+   Returns the original bytes as `application/octet-stream` with `Content-Disposition: attachment` and `Content-Security-Policy: sandbox; default-src 'none'; ...`.
+   `/raw/` returns `404` for these files.
+
+9. Other binaries (for example `.zip`, `.tar.gz`).
    Returns the bytes with `Content-Disposition: attachment; filename="<original_filename>"`.
    Sets `X-Content-Type-Options: nosniff`.
 
@@ -177,12 +198,15 @@ flowchart TD
 ```bash
 curl -i https://your-domain.example/8a9f60d3d526e85bd68e7ec8d21c3b5d2e3894df051394b0ac045e7f1bc8f8c7.png
 ```
-Response headers:
+Response is an HTML image preview. Inline bytes:
+
+```bash
+curl -i https://your-domain.example/raw/8a9f60d3d526e85bd68e7ec8d21c3b5d2e3894df051394b0ac045e7f1bc8f8c7.png
+```
 ```http
 HTTP/1.1 200 OK
 Content-Type: image/png
-Content-Disposition: attachment; filename="document.png"
-Content-Length: 120485
+Content-Disposition: inline; filename="document.png"
 X-Content-Type-Options: nosniff
 ```
 
@@ -304,25 +328,32 @@ Tells crawlers not to index hosted files.
 | `411 Length Required` | Length required | Request submitted without a `Content-Length` header. |
 | `413 Payload Too Large` | Payload too large | Upload exceeds `MAX_CONTENT_LENGTH`. |
 | `414 URI Too Long` | URI too long | Request URL exceeds `MAX_URL_LENGTH` (4096 bytes). |
-| `415 Unsupported Media Type` | Unsupported media type | Uploaded file matches `FHOST_MIME_BLACKLIST`. |
+| `415 Unsupported Media Type` | Unsupported media type | Uploaded file is a Windows executable or Java class/archive (`FHOST_MIME_BLACKLIST` or `.exe`/`.jar`/`.class`). |
 | `451 Unavailable For Legal Reasons` | Blocked content | File marked as `removed`, client IP in `FHOST_UPLOAD_BLACKLIST`, or re-upload of removed content. |
 
 ---
 
 ## Security and content policies
 
-### Blocked MIME types (`FHOST_MIME_BLACKLIST`)
-Executable payloads and active web content are rejected with HTTP 415:
+### Blocked uploads (`FHOST_MIME_BLACKLIST` and executable names)
+These are rejected with HTTP 415:
 
-- `application/xml`
-- `application/xhtml+xml`
 - `application/x-dosexec` (Windows/DOS executables)
-- `application/java-archive` (`.jar`)
-- `application/java-vm` (`.class`)
-- `image/svg+xml` (SVG, which can carry inline scripts)
-- `text/html` (HTML, which can carry inline scripts)
+- `application/java-archive` (`.jar` when detected as such)
+- `application/java-vm` / `application/x-java-applet` (`.class`)
+- Filenames ending in `.exe`, `.jar`, or `.class` (JARs are often detected as ZIP)
 
-`python-magic` (`libmagic`) reads MIME type from the raw bytes, so a renamed extension does not bypass the check.
+`python-magic` (`libmagic`) reads MIME type from the raw bytes, so renaming an EXE to `.txt` does not bypass the check. The 415 body names the detected type. This is not antivirus scanning.
+
+### Download-only types (`FHOST_DOWNLOAD_ONLY_MIMES`)
+These are stored and returned as opaque attachments (`application/octet-stream`, `nosniff`, CSP `sandbox`):
+
+- `text/html`, `application/xhtml+xml`
+- `image/svg+xml`
+- `application/xml`, `text/xml`
+- `application/javascript`, `text/javascript`, `application/ecmascript`, `application/x-javascript`
+
+They are never rendered as live pages. `/raw/` does not serve them.
 
 ---
 

@@ -66,13 +66,22 @@ app.config.update(
         "text/x-diff" : ".diff",
     },
     FHOST_MIME_BLACKLIST = [
-        "application/xml",
-        "application/xhtml+xml",
         "application/x-dosexec",
         "application/java-archive",
         "application/java-vm",
+        "application/x-java-applet",
+    ],
+    FHOST_EXECUTABLE_EXTS = (".exe", ".jar", ".class"),
+    FHOST_DOWNLOAD_ONLY_MIMES = [
+        "application/javascript",
+        "application/ecmascript",
+        "application/xhtml+xml",
+        "application/xml",
+        "application/x-javascript",
         "image/svg+xml",
         "text/html",
+        "text/javascript",
+        "text/xml",
     ],
     FHOST_UPLOAD_BLACKLIST = None,
     NSFW_DETECT = False,
@@ -198,7 +207,11 @@ class File(db.Model):
                 mime = "application/octet-stream"
 
             if mime in app.config["FHOST_MIME_BLACKLIST"] or guess in app.config["FHOST_MIME_BLACKLIST"]:
-                abort(415)
+                abort(415, description=(guess or mime).split(";", 1)[0].strip())
+
+            suffix = Path(file_.filename or "").suffix.lower()
+            if suffix in app.config["FHOST_EXECUTABLE_EXTS"]:
+                abort(415, description=(guess or mime or suffix).split(";", 1)[0].strip())
 
             if mime.startswith("text/") and not "charset" in mime:
                 mime += "; charset=utf-8"
@@ -240,6 +253,14 @@ class File(db.Model):
 
         mime = get_mime()
         ext = get_ext(mime)
+        # libmagic treats Markdown that contains <script> as text/html.
+        # Keep .md preview unless the bytes start as an HTML document.
+        if (
+            ext.lower() == ".md"
+            and mime.split(";", 1)[0].strip().lower() in ("text/html", "application/xhtml+xml")
+            and not data.lstrip()[:32].lower().startswith((b"<!doctype html", b"<html"))
+        ):
+            mime = "text/plain; charset=utf-8"
         original_name = get_original_name(ext)
         link = make_link(digest, ext, original_name)
 
@@ -327,17 +348,31 @@ def store_file(f, addr):
 
     return sf.geturl()
 
-def build_file_response(f, fpath):
+def _bare_mime(mime):
+    return (mime or "").split(";", 1)[0].strip().lower()
+
+
+def is_download_only(f):
+    return _bare_mime(f.mime) in app.config["FHOST_DOWNLOAD_ONLY_MIMES"]
+
+
+def build_file_response(f, fpath, inline=False):
+    mime = "application/octet-stream" if is_download_only(f) else f.mime
     if app.config["FHOST_USE_X_ACCEL_REDIRECT"]:
         response = make_response()
         response.headers["Content-Length"] = fpath.stat().st_size
         response.headers["X-Accel-Redirect"] = "/" + str(fpath)
     else:
-        response = send_from_directory(app.config["FHOST_STORAGE_PATH"], f.sha256, mimetype = f.mime)
+        response = send_from_directory(app.config["FHOST_STORAGE_PATH"], f.sha256, mimetype = mime)
 
-    response.headers["Content-Type"] = f.mime
-    response.headers["Content-Disposition"] = f'attachment; filename="{f.getdownloadname()}"'
+    response.headers["Content-Type"] = mime
+    disposition = "inline" if inline and not is_download_only(f) else "attachment"
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{f.getdownloadname()}"'
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if is_download_only(f) or (inline and _bare_mime(f.mime) == "application/pdf"):
+        response.headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'"
+        )
     return response
 
 
@@ -351,6 +386,14 @@ def should_render_markdown(f):
 
 def should_preview_video(f):
     return bool(f.mime and f.mime.startswith("video/"))
+
+
+def should_preview_image(f):
+    return _bare_mime(f.mime).startswith("image/")
+
+
+def should_preview_pdf(f):
+    return _bare_mime(f.mime) == "application/pdf"
 
 
 def should_render_csv(f):
@@ -430,6 +473,27 @@ def build_video_preview_response(f, fpath):
         "video_preview.html",
         download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
         mime=f.mime,
+    ))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def build_image_preview_response(f, fpath):
+    response = make_response(render_template(
+        "image_preview.html",
+        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        media_url=url_for("raw", path=f.getname(), _external=True, _scheme="https"),
+        filename=f.getdownloadname(),
+    ))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def build_pdf_preview_response(f, fpath):
+    response = make_response(render_template(
+        "pdf_preview.html",
+        download_url=url_for("download", path=f.getname(), _external=True, _scheme="https"),
+        media_url=url_for("raw", path=f.getname(), _external=True, _scheme="https"),
     ))
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -712,6 +776,16 @@ def download(path):
     return build_file_response(f, fpath)
 
 
+@app.route("/raw/<path:path>")
+def raw(path):
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("raw", f, extra)
+    if is_download_only(f) or not (should_preview_image(f) or should_preview_pdf(f)):
+        abort(404)
+    return build_file_response(f, fpath, inline=True)
+
+
 @app.route("/csv/<path:path>")
 def csv_data(path):
     f, fpath, is_legacy, extra = lookup_file(path)
@@ -769,6 +843,9 @@ def get(path):
     if is_legacy:
         return _make_legacy_redirect("get", f, extra)
 
+    if is_download_only(f):
+        return build_file_response(f, fpath)
+
     if should_render_markdown(f):
         return build_markdown_preview_response(f, fpath)
 
@@ -777,6 +854,12 @@ def get(path):
 
     if should_preview_video(f):
         return build_video_preview_response(f, fpath)
+
+    if should_preview_image(f):
+        return build_image_preview_response(f, fpath)
+
+    if should_preview_pdf(f):
+        return build_pdf_preview_response(f, fpath)
 
     if should_preview_file(f):
         return build_preview_response(f, fpath)
@@ -808,6 +891,10 @@ Disallow: /
 @app.errorhandler(451)
 def ehandler(e):
     try:
-        return render_template(f"{e.code}.html", id=id), e.code
+        return render_template(
+            f"{e.code}.html",
+            id=id,
+            description=getattr(e, "description", ""),
+        ), e.code
     except TemplateNotFound:
         return "Segmentation fault\n", e.code

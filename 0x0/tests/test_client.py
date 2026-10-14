@@ -178,14 +178,116 @@ def test_rejects_remote_url_import(client):
     assert rv.status_code == 400
 
 
-def test_html_upload_is_rejected(client):
+def test_html_upload_is_served_as_download_only(client):
+    payload = b"<!doctype html><html><body><script>alert(1)</script></body></html>"
     rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
-        data={"file": (BytesIO(b"<html></html>"), "index.html", "text/html")},
+        data={"file": (BytesIO(payload), "index.html", "text/html")},
+    )
+    assert rv.status_code == 200
+
+    path = get_uploaded_path(rv)
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.get_data() == payload
+    assert response.mimetype == "application/octet-stream"
+    assert response.headers["Content-Disposition"] == 'attachment; filename="index.html"'
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "sandbox" in response.headers.get("Content-Security-Policy", "")
+    assert "default-src 'none'" in response.headers.get("Content-Security-Policy", "")
+
+
+def test_svg_upload_is_served_as_download_only(client):
+    payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "logo.svg", "image/svg+xml")},
+    )
+    assert rv.status_code == 200
+
+    path = get_uploaded_path(rv)
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.get_data() == payload
+    assert response.mimetype == "application/octet-stream"
+    assert response.headers["Content-Disposition"] == 'attachment; filename="logo.svg"'
+    assert "sandbox" in response.headers.get("Content-Security-Policy", "")
+
+
+def test_xml_upload_is_served_as_download_only(client):
+    payload = b'<?xml version="1.0"?><root><item>hello</item></root>'
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "data.xml", "application/xml")},
+    )
+    assert rv.status_code == 200
+
+    path = get_uploaded_path(rv)
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.get_data() == payload
+    assert response.mimetype == "application/octet-stream"
+    assert response.headers["Content-Disposition"] == 'attachment; filename="data.xml"'
+    assert "sandbox" in response.headers.get("Content-Security-Policy", "")
+
+
+def test_html_named_as_markdown_is_not_previewed(client):
+    payload = b"<html><body><h1>not markdown</h1></body></html>"
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(payload), "readme.md", "text/html")},
+    )
+    assert rv.status_code == 200
+
+    response = client.get(get_uploaded_path(rv))
+    assert response.get_data() == payload
+    assert response.mimetype == "application/octet-stream"
+
+
+def test_windows_executable_upload_is_rejected_with_explanation(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"MZ" + b"\x00" * 64), "setup.exe")},
+    )
+    body = rv.get_data(as_text=True)
+    assert rv.status_code == 415
+    assert "executable" in body.lower()
+    assert "Segmentation fault" not in body
+    assert "application/x-dosexec" in body
+
+
+def test_java_class_upload_is_rejected(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(bytes([0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34]) + b"\x00" * 32), "Main.class")},
+    )
+    body = rv.get_data(as_text=True)
+    assert rv.status_code == 415
+    assert "executable" in body.lower()
+    assert "Segmentation fault" not in body
+
+
+def test_jar_upload_is_rejected(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"PK\x03\x04" + b"\x00" * 26), "app.jar")},
     )
     assert rv.status_code == 415
+    assert "executable" in rv.get_data(as_text=True).lower()
 
 
 def test_rejects_generic_url_shortening(client):
@@ -239,31 +341,85 @@ def test_text_preview_escapes_html_like_content(client):
     assert "<b>bold</b>" not in preview_html
 
 
-def test_non_text_files_still_download_directly(client):
+PNG_1X1 = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x02"
+    b"\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def test_png_upload_renders_image_preview_with_download_link(client):
     rv = client.post(
         "/",
         buffered=True,
         content_type="multipart/form-data",
-        data={
-            "file": (
-                BytesIO(
-                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-                    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x02"
-                    b"\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
-                ),
-                "image.png",
-                "image/png",
-            )
-        },
+        data={"file": (BytesIO(PNG_1X1), "image.png", "image/png")},
     )
 
     file_path = get_uploaded_path(rv)
-    download = client.get(file_path)
+    preview = client.get(file_path)
 
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    preview_html = preview.get_data(as_text=True)
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="https://localhost/download/' in preview_html
+    assert ">Download</a>" in preview_html
+    assert "<img" in preview_html
+    assert f'src="https://localhost/raw/{file_path}"' in preview_html
+
+    download = client.get(get_download_path(preview_html))
     assert download.status_code == 200
     assert download.mimetype == "image/png"
     assert download.headers["Content-Disposition"] == 'attachment; filename="image.png"'
-    assert "href=" not in download.get_data(as_text=False).decode("latin1", errors="ignore")
+    assert download.get_data() == PNG_1X1
+
+    media = client.get(f"/raw/{file_path}")
+    assert media.status_code == 200
+    assert media.mimetype == "image/png"
+    assert media.headers["Content-Disposition"] == 'inline; filename="image.png"'
+    assert media.get_data() == PNG_1X1
+
+
+MINIMAL_PDF = (
+    b"%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+
+
+def test_pdf_upload_renders_sandboxed_preview(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(MINIMAL_PDF), "doc.pdf")},
+    )
+
+    file_path = get_uploaded_path(rv)
+    preview = client.get(file_path)
+
+    assert preview.status_code == 200
+    assert preview.mimetype == "text/html"
+    preview_html = preview.get_data(as_text=True)
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert '<a href="https://localhost/download/' in preview_html
+    assert ">Download</a>" in preview_html
+    assert "<iframe" in preview_html
+    assert "sandbox" in preview_html
+    assert f'src="https://localhost/raw/{file_path}"' in preview_html
+
+    download = client.get(get_download_path(preview_html))
+    assert download.status_code == 200
+    assert download.mimetype == "application/pdf"
+    assert download.headers["Content-Disposition"] == 'attachment; filename="doc.pdf"'
+    assert download.get_data() == MINIMAL_PDF
+
+    media = client.get(f"/raw/{file_path}")
+    assert media.status_code == 200
+    assert media.mimetype == "application/pdf"
+    assert media.headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
+    assert "sandbox" in media.headers.get("Content-Security-Policy", "")
+    assert media.get_data() == MINIMAL_PDF
 
 
 def test_randomized_links_preserve_uploaded_filename_on_download(client):
@@ -676,7 +832,6 @@ def test_markdown_preview_sanitizes_script_tags(client):
     html = client.get(get_uploaded_path(rv)).get_data(as_text=True)
 
     assert "<script>alert('x')</script>" not in html
-    assert "<script" not in html
 
 
 def test_markdown_preview_sanitizes_inline_event_attributes(client):

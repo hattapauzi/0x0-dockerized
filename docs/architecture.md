@@ -11,9 +11,9 @@ This file records runtime layout, request flows, schema, and security.
 ### Goals
 1. Accept file uploads from `curl` and browsers.
 2. Derive 64-character hexadecimal HMAC-SHA256 URLs from `FHOST_LINK_SECRET`. Without the secret, a guessed URL does not tell you whether a file exists. Legacy 12-character tokens return HTTP 301.
-3. Browser previews for `.md`, `.csv`, `video/*`, and `text/*`. `/download/` still returns the file.
+3. Browser previews for `.md`, `.csv`, `video/*`, raster `image/*`, `application/pdf`, and `text/*`. `/download/` still returns the file. HTML, SVG, XML, and JavaScript are opaque attachments.
 4. Keep the original filename on download.
-5. Reject executable and active web payloads, disable remote URL fetch and shortening, send `X-Content-Type-Options: nosniff`.
+5. Reject Windows executables and Java class/archive files, serve active web content as download-only, disable remote URL fetch and shortening, send `X-Content-Type-Options: nosniff`.
 6. Store each payload once by SHA-256 (`data/up/<sha256>`). Same content, extension, and original name share a canonical link and refresh retention.
 7. Delete expired database rows, set `addr = NULL` on moderated records, and append to `file_audit` without IP addresses.
 
@@ -159,10 +159,18 @@ sequenceDiagram
                 Flask-->>Browser: 200 OK (Render csv_preview.html)
                 Browser->>Flask: GET /csv/<link><ext>?rb=0&cb=0 (tiles)
                 Flask-->>Browser: 200 OK (JSON tile data)
+            else Target is download-only MIME (HTML, SVG, XML, JavaScript)
+                Flask-->>Browser: 200 OK (octet-stream attachment + CSP sandbox)
             else Target is video/* MIME
                 Flask-->>Browser: 200 OK (Render video_preview.html with HTML5 player)
                 Browser->>Flask: GET /download/<link><ext> (video stream)
                 Flask->>FS: Stream range bytes (206 Partial Content)
+            else Target is raster image/*
+                Flask-->>Browser: 200 OK (Render image_preview.html)
+                Browser->>Flask: GET /raw/<link><ext> (inline image)
+            else Target is application/pdf
+                Flask-->>Browser: 200 OK (Render pdf_preview.html sandboxed iframe)
+                Browser->>Flask: GET /raw/<link><ext> (inline PDF)
             else Target is text/* MIME
                 Flask-->>Browser: 200 OK (Render preview.html <pre>)
             else Target is binary or /download/ requested
@@ -264,7 +272,7 @@ erDiagram
 ### 5.1 Controls
 1. HMAC-SHA256 link derivation. Public URLs cannot be predicted or listed offline without `FHOST_LINK_SECRET`.
 2. MIME detection. `python-magic` (`libmagic`) reads bytes from the file. A spoofed HTTP `Content-Type` is ignored.
-3. Active web payload blacklist. HTML, XML, SVG, Java bytecode, and Windows binaries are rejected, which cuts XSS and executable downloads.
+3. Upload vs preview vs download. Windows executables and Java class/archive files are rejected (MIME and `.exe`/`.jar`/`.class` names). HTML, SVG, XML, and JavaScript are stored and returned as `application/octet-stream` attachments with `nosniff` and a restrictive CSP. Raster images and PDFs preview from `/raw/` (`Content-Disposition: inline`); PDF preview uses a sandboxed iframe. This does not scan for malware.
 4. HTML sanitization. Markdown rendering uses `bleach` to allow tags such as `<p>`, `<h1>`-`<h6>`, `<code>`, `<pre>`, `<table>`, `<a>`, and `<img>`, and to strip scripts and other unsafe tags.
 5. Security headers. Every response includes `X-Content-Type-Options: nosniff`. Downloads use `Content-Disposition: attachment`.
 6. Audit logging. `file_audit` records moderation and cleanup actions. It does not store uploader IP addresses, query parameters, or other personal data.

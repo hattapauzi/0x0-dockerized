@@ -48,7 +48,7 @@ cd 0x0
 ~/.venvs/0x0/bin/python -m pytest tests/ -q
 ```
 
-All 67 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, and retention pruning should pass.
+All 74 tests covering uploads, HMAC derivation, CSV indexing and virtualization, Markdown, video, image/PDF preview, download-only HTML/SVG/XML, and retention pruning should pass.
 
 ### Run specific tests
 ```bash
@@ -152,7 +152,7 @@ Inspect the generated script under `0x0/migrations/versions/`. Check that:
 
 Before opening a pull request:
 
-1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 67 tests must pass).
+1. Run the test suite: `cd 0x0 && ~/.venvs/0x0/bin/python -m pytest tests/ -q` (all 74 tests must pass).
 2. Exercise Docker Compose: `docker compose up -d --build` and check upload/download with `curl`.
 3. If you added features or routes, add tests in `0x0/tests/test_client.py`.
 4. Keep working documentation, specs, and plans on a `docs/...` branch. Do not merge feature docs branches into `master`. Merge only the implementation branch (`feat/...` or `fix/...`), leave the docs branch, and name it in the merge commit message.
