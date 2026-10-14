@@ -688,9 +688,14 @@ def csv_data(path):
             return _csv_json({"rows": [[] for _ in range(n)]})
         parsed = csv_rows(fpath, index_path, start, n)
         out = []
+        left = (CSV_CELL_PREVIEW_CHARS - 1) // 2
+        right = CSV_CELL_PREVIEW_CHARS - 1 - left
         for row in parsed:
             slice_ = row[col0:col0 + CSV_TILE_COLS]
-            out.append([cell[:CSV_CELL_PREVIEW_CHARS] for cell in slice_])
+            out.append([
+                cell if len(cell) <= CSV_CELL_PREVIEW_CHARS else cell[:left] + "…" + cell[-right:]
+                for cell in slice_
+            ])
         return _csv_json({"rows": out})
     except FileNotFoundError:
         abort(404)

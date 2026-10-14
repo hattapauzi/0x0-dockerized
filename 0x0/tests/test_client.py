@@ -743,20 +743,26 @@ def test_csv_preview_no_grid_when_empty(client):
     assert "<dialog" not in html
 
 
-@pytest.mark.parametrize("width", [240, 400])
-def test_csv_preview_long_cells_preserve_horizontal_scroll(client, width):
+@pytest.mark.parametrize("width", [240, 900])
+def test_csv_preview_adapts_columns_and_preserves_horizontal_scroll(client, width):
     from playwright.sync_api import sync_playwright
 
+    long_cell = "BEGIN_" + "W" * 200 + "_employees"
     rv = client.post(
         "/",
         content_type="multipart/form-data",
-        data={"file": (BytesIO(("x" * 512 + ",last\n").encode()), "wide.csv")},
+        data={"file": (BytesIO((
+            "Id,Number of employees,Details\n1,1234," + long_cell + "\n"
+        ).encode()), "wide.csv")},
     )
     path = get_uploaded_path(rv)
     responses = {
         "/" + path: client.get(path),
         "/csv/" + path + "?rb=0&cb=0": client.get(
             "/csv/" + path, query_string={"rb": "0", "cb": "0"},
+        ),
+        "/csv/" + path + "?r=1&c=2": client.get(
+            "/csv/" + path, query_string={"r": "1", "c": "2"},
         ),
     }
 
@@ -782,20 +788,66 @@ def test_csv_preview_long_cells_preserve_horizontal_scroll(client, width):
             dimensions = page.evaluate("""() => {
                 const box = document.querySelector('.scrollbox');
                 const cells = document.querySelector('tbody tr').cells;
-                return [cells[0].offsetWidth, cells[1].offsetWidth,
-                        box.scrollWidth, box.clientWidth];
+                return [...cells].map(cell => cell.offsetWidth);
             }""")
-            assert dimensions[:2] == [80, 120]
-            if width == 400:
-                assert dimensions[2] == dimensions[3]
-            else:
-                page.evaluate("document.querySelector('.scrollbox').scrollLeft = 50")
-                page.wait_for_function("document.querySelector('tbody td').getBoundingClientRect().x === 30")
-                assert page.locator('tbody th').bounding_box()["x"] == 0
-                assert page.locator('thead .cell').first.bounding_box()["x"] == 30
-                page.evaluate("document.querySelector('.scrollbox').scrollLeft = 120")
-                page.wait_for_function("document.querySelector('thead .cell').textContent === 'B'")
-                assert page.locator('tbody td').first.text_content() == "last"
+            assert dimensions[0] == 80
+            assert dimensions[1] < dimensions[2] < dimensions[3]
+            label = page.locator('tbody tr').first.locator('td').nth(1)
+            assert label.text_content() == "Number of employees"
+            assert label.evaluate("cell => cell.scrollWidth === cell.clientWidth")
+            detail = page.locator('tbody tr').nth(1).locator('td').nth(2)
+            assert detail.text_content().startswith("BEGIN_")
+            assert detail.text_content().endswith("_employees")
+            assert "…" in detail.text_content()
+
+            page.evaluate("document.querySelector('.scrollbox').scrollLeft = 50")
+            page.wait_for_function("document.querySelector('tbody td').getBoundingClientRect().x === 30")
+            assert page.locator('tbody th').first.bounding_box()["x"] == 0
+            assert page.locator('thead .cell').first.bounding_box()["x"] == 30
+            page.evaluate("document.querySelector('.scrollbox').scrollLeft = 1000000")
+            page.wait_for_function("""() => {
+                const cell = [...document.querySelectorAll('thead .cell')].find(cell => cell.textContent === 'C');
+                return cell && cell.getBoundingClientRect().right <= innerWidth;
+            }""")
+            page.locator('tbody tr').nth(1).locator('td:visible').last.click()
+            page.wait_for_function("document.querySelector('dialog pre').textContent.endsWith('_employees')")
+            assert page.locator('dialog pre').text_content() == long_cell
+
+
+def test_csv_preview_scaled_wheel_advances_variable_width_columns(client):
+    from playwright.sync_api import sync_playwright
+
+    rv = client.post(
+        "/",
+        content_type="multipart/form-data",
+        data={"file": (BytesIO((",".join(["x"] * 100000) + "\n").encode()), "scaled.csv")},
+    )
+    path = get_uploaded_path(rv)
+    html = client.get(path)
+    tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"})
+
+    def serve(route):
+        response = tile if urlparse(route.request.url).path.startswith("/csv/") else html
+        route.fulfill(status=response.status_code, headers=dict(response.headers), body=response.data)
+
+    with sync_playwright() as playwright:
+        with playwright.chromium.launch(
+            channel="chromium",
+            executable_path=os.environ.get("CHROMIUM_EXECUTABLE_PATH"),
+        ) as browser:
+            page = browser.new_page(viewport={"width": 900, "height": 300})
+            page.set_default_timeout(5000)
+            page.route("http://localhost/**", serve)
+            page.goto("http://localhost/" + path)
+            page.wait_for_function("document.querySelector('tbody td').textContent === 'x'")
+            page.mouse.move(450, 150)
+            for label in ["B", "C", "D"]:
+                page.mouse.wheel(1, 0)
+                page.wait_for_function(
+                    "label => document.querySelector('thead .cell').textContent === label", arg=label,
+                )
+            page.mouse.wheel(-1, 0)
+            page.wait_for_function("document.querySelector('thead .cell').textContent === 'C'")
 
 
 def test_csv_index_is_reused_on_second_get(client, monkeypatch):
@@ -911,8 +963,8 @@ def test_csv_tile_straddling_quoted_newline_at_block_boundary(client):
     assert tile.get_json()["rows"] == [["a\nb"]]
 
 
-def test_csv_cell_returns_full_text_tile_truncates(client):
-    cell = "x" * 60
+def test_csv_cell_returns_full_text_tile_truncates_in_middle(client):
+    cell = "begin_" + "x" * 60 + "_employees"
     rv = client.post(
         "/",
         buffered=True,
@@ -921,7 +973,7 @@ def test_csv_cell_returns_full_text_tile_truncates(client):
     )
     path = get_uploaded_path(rv)
     tile = client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).get_json()
-    assert tile["rows"][1] == ["x" * 50]
+    assert tile["rows"][1] == ["begin_" + "x" * 18 + "…" + "x" * 15 + "_employees"]
     full = client.get("/csv/" + path, query_string={"r": "1", "c": "0"}).get_json()
     assert full["text"] == cell
 
