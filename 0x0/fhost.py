@@ -655,37 +655,66 @@ def build_csv_preview_response(f, fpath):
     return response
 
 
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
 def lookup_file(path):
-    path = Path(path.split("/", 1)[0])
-    sufs = "".join(path.suffixes[-2:])
-    name = path.name[:-len(sufs) or None]
+    parts = path.split("/", 1)
+    file_part = Path(parts[0])
+    extra = parts[1] if len(parts) > 1 else None
+    sufs = "".join(file_part.suffixes[-2:])
+    name = file_part.name[:-len(sufs) or None]
 
-    if sufs:
-        f = File.query.filter_by(token=name).first()
+    if not sufs or not name:
+        abort(404)
 
-        if f and f.ext == sufs:
-            if f.removed:
-                abort(451)
+    is_legacy = False
+    if HEX64_RE.match(name):
+        rows = File.query.filter_by(link=name, ext=sufs).all()
+        if not rows:
+            abort(404)
+        if any(r.removed for r in rows):
+            abort(451)
+        f = rows[0]
+    else:
+        # ponytail: legacy token links. Remove when
+        #   SELECT count(*) FROM file WHERE token IS NOT NULL;  -> 0
+        # then: migration dropping file.token and recreating uq_file_link without WHERE.
+        f = File.query.filter_by(token=name, ext=sufs).first()
+        if not f:
+            abort(404)
+        if f.removed:
+            abort(451)
+        if f.link and File.query.filter_by(link=f.link, removed=True).first():
+            abort(451)
+        is_legacy = True
 
-            fpath = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+    fpath = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+    if not fpath.is_file():
+        abort(404)
 
-            if not fpath.is_file():
-                abort(404)
+    return f, fpath, is_legacy, extra
 
-            return f, fpath
 
-    abort(404)
+def _make_legacy_redirect(endpoint, f, extra=None):
+    qs = f"?{request.query_string.decode('utf-8')}" if request.query_string else ""
+    target_path = f.getname() if not extra else f"{f.getname()}/{extra}"
+    target = url_for(endpoint, path=target_path, _external=True, _scheme="https") + qs
+    return redirect(target, code=301)
 
 
 @app.route("/download/<path:path>")
 def download(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("download", f, extra)
     return build_file_response(f, fpath)
 
 
 @app.route("/csv/<path:path>")
 def csv_data(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("csv_data", f, extra)
     if not should_render_csv(f):
         abort(404)
     try:
@@ -734,7 +763,9 @@ def csv_data(path):
 
 @app.route("/<path:path>")
 def get(path):
-    f, fpath = lookup_file(path)
+    f, fpath, is_legacy, extra = lookup_file(path)
+    if is_legacy:
+        return _make_legacy_redirect("get", f, extra)
 
     if should_render_markdown(f):
         return build_markdown_preview_response(f, fpath)

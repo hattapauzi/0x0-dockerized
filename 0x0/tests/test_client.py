@@ -120,7 +120,7 @@ def test_client(client):
         assert rv.status_code == s
         if rv.status_code == 200:
             location = rv.data.decode()
-            assert TOKEN_RE.match(location)
+            assert LINK_RE.match(location)
             paths.append(location.removeprefix("https://localhost/").strip())
 
     assert paths[0] != paths[1]
@@ -366,6 +366,98 @@ def test_reupload_of_removed_file_returns_451(client):
     assert rv2.status_code == 451
 
 
+def test_canonical_link_returns_200_without_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"test-content"), "canon.txt")},
+    )
+    path = get_uploaded_path(rv)
+    resp = client.get(path)
+    assert resp.status_code == 200
+
+
+def test_legacy_token_301_redirects_to_canonical_link(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-content"), "leg.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "1234567890ab"
+        db.session.commit()
+        token = f.token
+        link = f.link
+
+    resp = client.get(f"/{token}.txt?foo=bar")
+    assert resp.status_code == 301
+    assert resp.headers["Location"].endswith(f"/{link}.txt?foo=bar")
+
+    dl_resp = client.get(f"/download/{token}.txt")
+    assert dl_resp.status_code == 301
+    assert dl_resp.headers["Location"].endswith(f"/download/{link}.txt")
+
+
+def test_legacy_token_removed_returns_451_before_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-removed"), "bad.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "legacyrem001"
+        f.removed = True
+        db.session.commit()
+
+    resp = client.get("/legacyrem001.txt")
+    assert resp.status_code == 451
+    assert "Location" not in resp.headers
+
+
+def test_legacy_token_missing_storage_returns_404_before_redirect(client):
+    rv = client.post(
+        "/",
+        buffered=True,
+        content_type="multipart/form-data",
+        data={"file": (BytesIO(b"legacy-missing"), "gone.txt")},
+    )
+    link_val = rv.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f = File.query.filter_by(link=link_val).first()
+        f.token = "legacymiss01"
+        db.session.commit()
+        storage_file = Path(app.config["FHOST_STORAGE_PATH"]) / f.sha256
+        if storage_file.exists():
+            storage_file.unlink()
+
+    resp = client.get("/legacymiss01.txt")
+    assert resp.status_code == 404
+    assert "Location" not in resp.headers
+
+
+def test_multiple_legacy_duplicates_451_if_any_removed(client):
+    from fhost import make_link
+    with app.app_context():
+        link_shared = make_link("dup-sha", ".txt", "dup.txt")
+        f1 = File("dup-sha", "token1111111", ".txt", "text/plain", "127.0.0.1", "dup.txt", link=link_shared)
+        f2 = File("dup-sha", "token2222222", ".txt", "text/plain", "127.0.0.1", "dup.txt", link=link_shared)
+        f2.removed = True
+        storage_file = Path(app.config["FHOST_STORAGE_PATH"]) / "dup-sha"
+        storage_file.write_bytes(b"content")
+        db.session.add_all([f1, f2])
+        db.session.commit()
+
+    resp = client.get(f"/{link_shared}.txt")
+    assert resp.status_code == 451
+
+
 def test_uploaded_file_urls_use_long_random_tokens(client):
     rv = client.post(
         "/",
@@ -375,7 +467,7 @@ def test_uploaded_file_urls_use_long_random_tokens(client):
     )
 
     assert rv.status_code == 200
-    assert TOKEN_RE.match(rv.data.decode())
+    assert LINK_RE.match(rv.data.decode())
 
 
 def test_dotted_filenames_keep_real_file_extension_in_public_url(client):
@@ -411,8 +503,8 @@ def test_dotted_filenames_keep_real_file_extension_in_public_url(client):
     assert not pdf_path.endswith(".my_fpx-r")
     assert video_path.endswith(".mp4")
     assert not video_path.endswith("._created")
-    assert TOKEN_RE.match(pdf.data.decode())
-    assert TOKEN_RE.match(video.data.decode())
+    assert LINK_RE.match(pdf.data.decode())
+    assert LINK_RE.match(video.data.decode())
 
     pdf_download = client.get(f"/download/{pdf_path}")
     video_download = client.get(f"/download/{video_path}")
@@ -452,7 +544,7 @@ def test_markdown_upload_returns_md_url(client):
 
     assert rv.status_code == 200
     assert get_uploaded_path(rv).endswith(".md")
-    assert TOKEN_RE.match(rv.data.decode())
+    assert LINK_RE.match(rv.data.decode())
 
 
 def test_markdown_preview_renders_common_markdown(client):
@@ -1182,8 +1274,8 @@ def test_csv_data_rejects_non_csv_and_removed(client):
         data={"file": (BytesIO(b"a\n"), "gone.csv")},
     )
     path = get_uploaded_path(rv)
-    token = path[:-4]
-    f = File.query.filter_by(token=token).first()
+    link = path[:-4]
+    f = File.query.filter_by(link=link).first()
     f.removed = True
     db.session.commit()
     assert client.get("/csv/" + path, query_string={"rb": "0", "cb": "0"}).status_code == 451
