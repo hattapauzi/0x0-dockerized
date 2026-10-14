@@ -50,6 +50,49 @@ def cleanup_expired(storage_path, maxs, mind=30, maxd=365):
             os.remove(os.path.join(index_dir, name))
 
 
+from pathlib import Path
+
+# ponytail: legacy token links. Remove when
+#   SELECT count(*) FROM file WHERE token IS NOT NULL;  -> 0
+# then: migration dropping file.token and recreating uq_file_link without WHERE.
+
+def prune_rows(storage_path):
+    import sys
+    if "fhost" in sys.modules:
+        fhost = sys.modules["fhost"]
+    else:
+        import fhost
+    app = fhost.app
+    db = fhost.db
+    File = fhost.File
+    FileAudit = fhost.FileAudit
+
+    storage = Path(storage_path)
+    with app.app_context():
+        distinct_shas = [r[0] for r in db.session.query(File.sha256).distinct().all() if r[0]]
+
+        for sha in distinct_shas:
+            # Fresh stat check: avoid race conditions with recent uploads
+            if (storage / sha).is_file():
+                continue
+
+            # 1. Unmoderated expired files: record non-PII audit and delete row (data minimization)
+            expired_rows = File.query.filter_by(sha256=sha, removed=False).all()
+            for row in expired_rows:
+                db.session.add(FileAudit(sha256=row.sha256, link=row.link, action="PRUNED_EXPIRED"))
+            if expired_rows:
+                File.query.filter_by(sha256=sha, removed=False).delete()
+
+            # 2. Moderated files: scrub IP to protect privacy, keep minimal blocklist row
+            moderated_rows = File.query.filter(File.sha256 == sha, File.removed == True, File.addr != None).all()
+            for row in moderated_rows:
+                db.session.add(FileAudit(sha256=row.sha256, link=row.link, action="MODERATED_ADDR_SCRUBBED"))
+                row.addr = None
+
+        db.session.commit()
+
+
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(sys.argv[0])))
     cleanup_expired(app.config["FHOST_STORAGE_PATH"], app.config["MAX_CONTENT_LENGTH"])
+    prune_rows(app.config["FHOST_STORAGE_PATH"])

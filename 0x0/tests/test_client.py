@@ -1330,3 +1330,55 @@ def test_cleanup_keeps_index_for_live_csv_and_drops_it_after_expiry(client):
     assert not index.exists()
 
 
+def test_prune_rows_deletes_expired_active_records_and_logs_audit(client):
+    import cleanup as cleanup_mod
+    from fhost import FileAudit
+
+    # 1. Active file that has expired (file deleted on disk)
+    rv1 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"active-expired"), "f1.txt")})
+    link1 = rv1.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f1 = File.query.filter_by(link=link1).first()
+        sha1 = f1.sha256
+    storage_file1 = Path(app.config["FHOST_STORAGE_PATH"]) / sha1
+    storage_file1.unlink()
+
+    # 2. Active file that has NOT expired (file exists on disk)
+    rv2 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"active-not-expired"), "f2.txt")})
+    link2 = rv2.data.decode().removeprefix("https://localhost/").split(".")[0]
+
+    # 3. Moderated file that has expired (file deleted on disk) with IP set
+    rv3 = client.post("/", buffered=True, content_type="multipart/form-data", data={"file": (BytesIO(b"moderated-expired"), "f3.txt")})
+    link3 = rv3.data.decode().removeprefix("https://localhost/").split(".")[0]
+    with app.app_context():
+        f3 = File.query.filter_by(link=link3).first()
+        f3.removed = True
+        f3.addr = "192.168.1.100"
+        sha3 = f3.sha256
+        db.session.commit()
+    storage_file3 = Path(app.config["FHOST_STORAGE_PATH"]) / sha3
+    storage_file3.unlink()
+
+    cleanup_mod.prune_rows(app.config["FHOST_STORAGE_PATH"])
+
+    with app.app_context():
+        # Verify f1 (active expired) was deleted
+        assert File.query.filter_by(link=link1).first() is None
+        audit1 = FileAudit.query.filter_by(sha256=sha1, action="PRUNED_EXPIRED").first()
+        assert audit1 is not None
+        assert audit1.link == link1
+
+        # Verify f2 (active not expired) was kept
+        assert File.query.filter_by(link=link2).first() is not None
+
+        # Verify f3 (moderated expired) was kept but addr scrubbed to None
+        f3_post = File.query.filter_by(link=link3).first()
+        assert f3_post is not None
+        assert f3_post.addr is None
+        audit3 = FileAudit.query.filter_by(sha256=sha3, action="MODERATED_ADDR_SCRUBBED").first()
+        assert audit3 is not None
+
+        # Verify zero PII in audit table
+        assert not hasattr(FileAudit, "addr")
+
+
