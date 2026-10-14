@@ -136,4 +136,5 @@ Before opening a pull request:
 1. Run the test suite: `~/.venvs/0x0/bin/python -m pytest tests/ -q` (all tests must pass).
 2. Test end-to-end in Docker Compose: `docker compose up -d --build` and verify upload/download via `curl`.
 3. If new features or routes were added, add corresponding test cases in `0x0/tests/test_client.py`.
-4. Update relevant documentation in `docs/` and `source-of-truth/0x0-dockerized-master-tech-spec.md`.
+4. **Branch & Documentation Policy:** Keep feature working documentation, specs, and plans on a dedicated `docs/...` branch. Do not merge feature docs branches into `master`; only merge the implementation branch (`feat/...` or `fix/...`), leaving the docs branch behind, and reference the docs branch in the merge commit message.
+
