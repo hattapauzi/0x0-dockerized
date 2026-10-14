@@ -48,6 +48,20 @@
       background: #f3f4f6;
       font-weight: 600;
     }
+    thead th {
+      position: relative;
+      z-index: 2;
+      background: #f3f4f6;
+    }
+    th.num {
+      position: relative;
+      z-index: 2;
+      background: #f3f4f6;
+      width: 80px;
+    }
+    thead th.num {
+      z-index: 3;
+    }
     .num { width: 80px; }
     .cell { width: 120px; cursor: pointer; }
     dialog {
@@ -134,8 +148,8 @@
         viewport.style.height = "0";
         viewport.style.width = "0";
         viewport.style.overflow = "visible";
-        poolRows = Math.min(CFG.rows, viewRows + 1);
-        poolCols = CFG.cols === 0 ? 0 : Math.min(CFG.cols, viewCols + 1);
+        poolRows = Math.min(CFG.rows, viewRows + 2);
+        poolCols = CFG.cols === 0 ? 0 : Math.min(CFG.cols, viewCols + 2);
         table.replaceChildren();
         const head = table.createTHead();
         const hr = head.insertRow();
@@ -231,10 +245,17 @@
       function draw() {
         const fr = firstRow();
         const fc = firstCol();
+        const remX = !hScaled && CFG.cols > viewCols ? Math.max(0, scrollbox.scrollLeft - fc * CW) : 0;
+        const remY = !vScaled && CFG.rows > viewRows ? Math.max(0, scrollbox.scrollTop - fr * RH) : 0;
+
+        table.style.transform = `translate(${-remX}px, ${-remY}px)`;
+
         const head = table.tHead.rows[0];
+        head.cells[0].style.transform = `translate(${remX}px, ${remY}px)`;
         for (let j = 0; j < poolCols; j++) {
           const c = fc + j;
           const th = head.cells[j + 1];
+          th.style.transform = `translateY(${remY}px)`;
           if (c >= CFG.cols) {
             th.textContent = "";
             th.style.visibility = "hidden";
@@ -252,6 +273,7 @@
             continue;
           }
           tr.style.visibility = "visible";
+          tr.cells[0].style.transform = `translateX(${remX}px)`;
           tr.cells[0].textContent = String(r + 1);
           for (let j = 0; j < poolCols; j++) {
             const c = fc + j;
